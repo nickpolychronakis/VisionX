@@ -180,9 +180,24 @@ Examples:
     if args.dir:
         dir_path = Path(args.dir)
         if dir_path.is_dir():
-            video_files = list(dir_path.glob('*.mp4')) + list(dir_path.glob('*.avi')) + \
-                         list(dir_path.glob('*.mov')) + list(dir_path.glob('*.mkv'))
-            video_files = [str(f) for f in sorted(video_files)]
+            # Support common video formats (lowercase and uppercase)
+            extensions = [
+                'mp4', 'MP4', 'm4v', 'M4V',
+                'avi', 'AVI',
+                'mov', 'MOV',
+                'mkv', 'MKV',
+                'wmv', 'WMV',
+                'flv', 'FLV',
+                'webm', 'WEBM',
+                'mpeg', 'MPEG', 'mpg', 'MPG',
+                'ts', 'TS', 'mts', 'MTS', 'm2ts', 'M2TS',
+                '3gp', '3GP',
+                'asf', 'ASF',
+            ]
+            video_files = []
+            for ext in extensions:
+                video_files.extend(dir_path.glob(f'*.{ext}'))
+            video_files = [str(f) for f in sorted(set(video_files))]
         else:
             print(f'Error: {args.dir} is not a directory')
             return
