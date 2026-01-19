@@ -10,7 +10,6 @@ DEFAULT_CONFIG = {
     'model': 'yoloe-26m-seg.pt',
     'prompts': ['car', 'truck', 'bus', 'motorcycle', 'bicycle', 'scooter', 'person'],
     'confidence': 0.5,
-    'output_dir': './output',
     'save_video': True,
     'save_crops': False,
     'save_txt': False,
@@ -60,7 +59,8 @@ Examples:
     model = args.model or cfg['model']
     prompts = args.search or cfg['prompts']
     conf = args.conf or cfg['confidence']
-    output = args.output or cfg['output_dir']
+    # Default output: same directory as input video
+    output = args.output or str(Path(args.source).parent)
     save_crops = args.crops or cfg['save_crops']
     save_txt = args.txt or cfg['save_txt']
     half = args.half or cfg['half']

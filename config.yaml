@@ -12,7 +12,6 @@ prompts:
   - person
 
 confidence: 0.5
-output_dir: ./output
 save_video: true
 save_crops: false
 save_txt: false
