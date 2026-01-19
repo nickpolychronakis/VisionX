@@ -1,13 +1,13 @@
 # VisionX Default Configuration
 
-model: yoloe-26m-seg.pt
+model: yoloe-26l-seg.pt
 
 prompts:
   - car
   - person
   - motorcycle
 
-confidence: 0.25
+confidence: 0.6
 save_video: true
 save_crops: false
 half: false
