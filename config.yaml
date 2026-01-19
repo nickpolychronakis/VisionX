@@ -14,7 +14,6 @@ prompts:
 confidence: 0.5
 save_video: true
 save_crops: false
-save_txt: false
 half: false
 vid_stride: 1
 show: false

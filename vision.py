@@ -12,7 +12,6 @@ DEFAULT_CONFIG = {
     'confidence': 0.5,
     'save_video': True,
     'save_crops': False,
-    'save_txt': False,
     'half': False,
     'vid_stride': 1,
     'show': False,
@@ -36,7 +35,7 @@ def main():
 Examples:
   python vision.py video.mp4
   python vision.py --search "white car" video.mp4
-  python vision.py --crops --txt video.mp4
+  python vision.py --crops video.mp4
         '''
     )
     parser.add_argument('source', help='Video file or URL')
@@ -45,7 +44,6 @@ Examples:
     parser.add_argument('--conf', type=float, help='Confidence threshold')
     parser.add_argument('--output', '-o', help='Output directory')
     parser.add_argument('--crops', action='store_true', help='Save cropped detections')
-    parser.add_argument('--txt', action='store_true', help='Save coordinates to txt')
     parser.add_argument('--half', action='store_true', help='FP16 mode (faster)')
     parser.add_argument('--stride', type=int, help='Frame skip (2=2x faster)')
     parser.add_argument('--show', action='store_true', help='Live preview')
@@ -62,7 +60,6 @@ Examples:
     # Default output: same directory as input video
     output = args.output or str(Path(args.source).parent)
     save_crops = args.crops or cfg['save_crops']
-    save_txt = args.txt or cfg['save_txt']
     half = args.half or cfg['half']
     stride = args.stride or cfg['vid_stride']
     show = args.show or cfg['show']
@@ -85,7 +82,6 @@ Examples:
         persist=True,
         save=True,
         save_crop=save_crops,
-        save_txt=save_txt,
         project=output,
         name='',
         half=half,
