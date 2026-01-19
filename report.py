@@ -126,6 +126,10 @@ def generate_report(tracks: dict, output_dir: str, video_name: str, video_path: 
             transition: opacity 0.2s;
         }}
         .thumbnail:hover {{ opacity: 0.8; }}
+        /* For persons, show top (face) instead of center */
+        .card[data-class="person"] .thumbnail {{
+            object-position: top;
+        }}
         .lightbox {{
             display: none;
             position: fixed;
