@@ -3,7 +3,9 @@
 
 import argparse
 import yaml
+import cv2
 from pathlib import Path
+from tqdm import tqdm
 from ultralytics import YOLO  # type: ignore[attr-defined]
 
 DEFAULT_CONFIG = {
@@ -75,8 +77,13 @@ Examples:
     yolo.set_classes(prompts)  # type: ignore[misc]
     print(f'Detecting: {", ".join(prompts)}')
 
-    # Run tracking
-    yolo.track(
+    # Get video frame count for progress bar
+    cap = cv2.VideoCapture(args.source)
+    total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+    cap.release()
+
+    # Run tracking (stream=True prevents OOM on large videos)
+    results = yolo.track(
         source=args.source,
         conf=conf,
         persist=True,
@@ -87,8 +94,12 @@ Examples:
         half=half,
         vid_stride=stride,
         show=show,
+        stream=True,
         verbose=False,
     )
+
+    for _ in tqdm(results, total=total_frames // stride, desc='Processing', unit='frame'):
+        pass
 
     print(f'Done! Output: {output}/')
 
