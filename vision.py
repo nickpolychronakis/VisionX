@@ -145,12 +145,14 @@ Examples:
                         'last_seen': timestamp,
                     }
 
-                    # Save thumbnail (best frame per track)
+                    # Save thumbnail (best frame per track) with 30% padding
                     x1, y1, x2, y2 = map(int, box.tolist())
-                    # Ensure valid crop coordinates
                     h, w = result.orig_img.shape[:2]
-                    x1, y1 = max(0, x1), max(0, y1)
-                    x2, y2 = min(w, x2), min(h, y2)
+                    box_w, box_h = x2 - x1, y2 - y1
+                    pad_x, pad_y = int(box_w * 0.3), int(box_h * 0.3)
+                    # Apply padding and clamp to image bounds
+                    x1, y1 = max(0, x1 - pad_x), max(0, y1 - pad_y)
+                    x2, y2 = min(w, x2 + pad_x), min(h, y2 + pad_y)
                     if x2 > x1 and y2 > y1:
                         thumb = result.orig_img[y1:y2, x1:x2]
                         cv2.imwrite(str(report_dir / f"{track_id}_{class_name}.jpg"), thumb)

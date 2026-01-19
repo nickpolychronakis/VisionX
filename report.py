@@ -26,7 +26,7 @@ def generate_report(tracks: dict, output_dir: str, video_name: str, video_path: 
 
         card = f'''
         <div class="card" data-class="{track['class']}">
-            <img src="{thumb_path}" alt="{track['class']} #{track_id}" class="thumbnail">
+            <img src="{thumb_path}" alt="{track['class']} #{track_id}" class="thumbnail" onclick="openLightbox('{thumb_path}', '{track['class'].upper()} #{track_id}')" title="Click to zoom">
             <div class="info">
                 <div class="title">{track['class'].upper()} #{track_id}</div>
                 <div class="confidence">Confidence: {track['confidence']:.0%}</div>
@@ -122,7 +122,45 @@ def generate_report(tracks: dict, output_dir: str, video_name: str, video_path: 
             width: 120px;
             height: 120px;
             object-fit: cover;
+            cursor: zoom-in;
+            transition: opacity 0.2s;
         }}
+        .thumbnail:hover {{ opacity: 0.8; }}
+        .lightbox {{
+            display: none;
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            background: rgba(0, 0, 0, 0.9);
+            z-index: 2000;
+            justify-content: center;
+            align-items: center;
+            flex-direction: column;
+        }}
+        .lightbox.active {{ display: flex; }}
+        .lightbox img {{
+            max-width: 90%;
+            max-height: 80%;
+            border-radius: 8px;
+            box-shadow: 0 10px 40px rgba(0, 0, 0, 0.5);
+        }}
+        .lightbox-title {{
+            color: #fff;
+            margin-top: 15px;
+            font-size: 1.2em;
+        }}
+        .lightbox-close {{
+            position: absolute;
+            top: 20px;
+            right: 30px;
+            font-size: 40px;
+            color: #fff;
+            cursor: pointer;
+            transition: color 0.2s;
+        }}
+        .lightbox-close:hover {{ color: #e94560; }}
         .info {{
             padding: 12px;
             flex: 1;
@@ -210,6 +248,12 @@ def generate_report(tracks: dict, output_dir: str, video_name: str, video_path: 
 
     <div class="toast" id="toast">Copied to clipboard!</div>
 
+    <div class="lightbox" id="lightbox" onclick="closeLightbox()">
+        <span class="lightbox-close">&times;</span>
+        <img id="lightbox-img" src="" alt="">
+        <div class="lightbox-title" id="lightbox-title"></div>
+    </div>
+
     <script>
         function copyTimestamp(ts) {{
             navigator.clipboard.writeText(ts).then(() => {{
@@ -218,6 +262,21 @@ def generate_report(tracks: dict, output_dir: str, video_name: str, video_path: 
                 setTimeout(() => toast.classList.remove('show'), 2000);
             }});
         }}
+
+        function openLightbox(src, title) {{
+            document.getElementById('lightbox-img').src = src;
+            document.getElementById('lightbox-title').textContent = title;
+            document.getElementById('lightbox').classList.add('active');
+        }}
+
+        function closeLightbox() {{
+            document.getElementById('lightbox').classList.remove('active');
+        }}
+
+        // Close lightbox with Escape key
+        document.addEventListener('keydown', (e) => {{
+            if (e.key === 'Escape') closeLightbox();
+        }});
 
         function filterClass(cls) {{
             // Update active button
