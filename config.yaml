@@ -1,0 +1,21 @@
+# VisionX Default Configuration
+
+model: yoloe-26m-seg.pt
+
+prompts:
+  - car
+  - truck
+  - bus
+  - motorcycle
+  - bicycle
+  - scooter
+  - person
+
+confidence: 0.5
+output_dir: ./output
+save_video: true
+save_crops: false
+save_txt: false
+half: false
+vid_stride: 1
+show: false
