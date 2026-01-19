@@ -11,7 +11,7 @@ from ultralytics import YOLO  # type: ignore[attr-defined]
 
 DEFAULT_CONFIG = {
     'model': 'yoloe-26m-seg.pt',
-    'prompts': ['car', 'truck', 'bus', 'motorcycle', 'bicycle', 'scooter', 'person'],
+    'prompts': ['car', 'person', 'motorcycle'],
     'confidence': 0.5,
     'save_video': True,
     'save_crops': False,
