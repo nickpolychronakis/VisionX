@@ -11,22 +11,24 @@ def format_timestamp(seconds: float) -> str:
     return f"{h:02d}:{m:02d}:{s:02d}"
 
 
-def generate_report(tracks: dict, output_dir: str, video_name: str, video_path: str):
-    """Generate standalone HTML report with detection timeline"""
+def generate_report(tracks: dict, output_dir: str, video_name: str, video_path: str) -> str:
+    """Generate standalone HTML report with embedded thumbnails"""
 
-    report_dir = Path(output_dir) / 'report'
-    report_dir.mkdir(parents=True, exist_ok=True)
+    output_path = Path(output_dir)
+    output_path.mkdir(parents=True, exist_ok=True)
 
     # Generate detection cards HTML
     cards_html = []
     for track_id, track in sorted(tracks.items(), key=lambda x: x[1]['first_seen']):
-        thumb_path = f"thumbnails/{track_id}_{track['class']}.jpg"
         first_ts = format_timestamp(track['first_seen'])
         last_ts = format_timestamp(track['last_seen'])
 
+        # Use embedded base64 thumbnail
+        thumb_src = f"data:image/jpeg;base64,{track['thumbnail']}" if track.get('thumbnail') else ""
+
         card = f'''
         <div class="card" data-class="{track['class']}">
-            <img src="{thumb_path}" alt="{track['class']} #{track_id}" class="thumbnail" onclick="openLightbox('{thumb_path}', '{track['class'].upper()} #{track_id}')" title="Click to zoom">
+            <img src="{thumb_src}" alt="{track['class']} #{track_id}" class="thumbnail" onclick="openLightbox(this.src, '{track['class'].upper()} #{track_id}')" title="Click to zoom">
             <div class="info">
                 <div class="title">{track['class'].upper()} #{track_id}</div>
                 <div class="confidence">Confidence: {track['confidence']:.0%}</div>
@@ -210,6 +212,7 @@ def generate_report(tracks: dict, output_dir: str, video_name: str, video_path: 
             display: flex;
             gap: 20px;
             margin-bottom: 20px;
+            flex-wrap: wrap;
         }}
         .stat {{
             background: #16213e;
@@ -226,7 +229,7 @@ def generate_report(tracks: dict, output_dir: str, video_name: str, video_path: 
 </head>
 <body>
     <h1>VisionX Detection Report</h1>
-    <div class="video-info">{video_name}</div>
+    <div class="video-info">{Path(video_path).name}</div>
 
     <div class="instructions">
         <strong>How to use:</strong> Click on a timestamp to copy it.
@@ -307,10 +310,12 @@ def generate_report(tracks: dict, output_dir: str, video_name: str, video_path: 
 </body>
 </html>'''
 
-    with open(report_dir / 'report.html', 'w') as f:
+    # Save as video_report.html (same name as video)
+    report_file = output_path / f'{video_name}_report.html'
+    with open(report_file, 'w') as f:
         f.write(html)
 
-    return str(report_dir / 'report.html')
+    return str(report_file)
 
 
 def generate_class_stats(tracks: dict) -> str:
