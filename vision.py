@@ -4,6 +4,7 @@
 import argparse
 import yaml
 import cv2
+import torch
 from pathlib import Path
 from tqdm import tqdm
 from ultralytics import YOLO  # type: ignore[attr-defined]
@@ -69,6 +70,10 @@ Examples:
     # Setup output
     Path(output).mkdir(parents=True, exist_ok=True)
 
+    # Select device (MPS for Apple Silicon, else CPU)
+    device = 'mps' if torch.backends.mps.is_available() else 'cpu'
+    print(f'Using device: {device}')
+
     # Load model
     print(f'Loading {model}...')
     yolo = YOLO(model)
@@ -86,6 +91,7 @@ Examples:
     results = yolo.track(
         source=args.source,
         conf=conf,
+        device=device,
         persist=True,
         save=True,
         save_crop=save_crops,
