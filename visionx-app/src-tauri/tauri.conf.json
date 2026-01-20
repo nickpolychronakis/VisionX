@@ -1,0 +1,44 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "VisionX",
+  "version": "0.1.0",
+  "identifier": "com.visionx.app",
+  "build": {
+    "beforeDevCommand": "pnpm dev",
+    "devUrl": "http://localhost:1420",
+    "beforeBuildCommand": "pnpm build",
+    "frontendDist": "../dist"
+  },
+  "app": {
+    "windows": [
+      {
+        "title": "VisionX",
+        "label": "main",
+        "width": 900,
+        "height": 850,
+        "minWidth": 600,
+        "minHeight": 600,
+        "resizable": true,
+        "center": true,
+        "dragDropEnabled": true
+      }
+    ],
+    "security": {
+      "csp": null
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": "all",
+    "icon": ["icons/icon.png"],
+    "macOS": {
+      "minimumSystemVersion": "10.15"
+    },
+    "windows": {
+      "webviewInstallMode": {
+        "type": "downloadBootstrapper"
+      }
+    }
+  },
+  "plugins": {}
+}

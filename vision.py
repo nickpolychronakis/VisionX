@@ -3,6 +3,7 @@
 
 import argparse
 import base64
+import json
 import yaml
 import cv2
 import torch
@@ -35,10 +36,21 @@ def load_config(config_path: str = 'config.yaml') -> dict:
     return config
 
 
-def process_video(source: str, yolo: YOLO, cfg: dict, args) -> str | None:
+def emit_json(event_type: str, **data):
+    """Emit a JSON event to stdout for GUI consumption"""
+    event = {'type': event_type, **data}
+    print(json.dumps(event), flush=True)
+
+
+def process_video(source: str, yolo: YOLO, cfg: dict, args, video_index: int = 1, total_videos: int = 1) -> str | None:
     """Process a single video and return report path if generated"""
     source_path = Path(source)
-    print(f'\nProcessing: {source_path.name}')
+    json_progress = getattr(args, 'json_progress', False)
+
+    if json_progress:
+        emit_json('status', message=f'Processing: {source_path.name}')
+    else:
+        print(f'\nProcessing: {source_path.name}')
 
     # Get settings
     conf = args.conf or cfg['confidence']
@@ -85,9 +97,31 @@ def process_video(source: str, yolo: YOLO, cfg: dict, args) -> str | None:
     # Track detections for report (with embedded thumbnails)
     tracks = {}  # track_id -> detection info + thumbnail
     frame_num = 0
+    total_processed = total_frames // stride
+    last_progress_pct = -1
 
-    for result in tqdm(results, total=total_frames // stride, desc='  Analyzing', unit='frame'):
+    # Use tqdm for CLI, JSON events for GUI
+    if json_progress:
+        results_iter = results
+    else:
+        results_iter = tqdm(results, total=total_processed, desc='  Analyzing', unit='frame')
+
+    for result in results_iter:
         frame_num += 1
+
+        # Emit progress for GUI (throttled to avoid flooding)
+        if json_progress:
+            progress_pct = int((frame_num / total_processed) * 100) if total_processed > 0 else 0
+            if progress_pct != last_progress_pct:
+                emit_json('progress',
+                    video=source_path.name,
+                    frame=frame_num,
+                    total_frames=total_processed,
+                    video_index=video_index,
+                    total_videos=total_videos,
+                    fps=fps
+                )
+                last_progress_pct = progress_pct
 
         if save_report and result.boxes is not None and len(result.boxes):
             for i in range(len(result.boxes)):
@@ -139,7 +173,10 @@ def process_video(source: str, yolo: YOLO, cfg: dict, args) -> str | None:
         video_name = source_path.stem  # filename without extension
         output_dir = args.output or str(source_path.parent)
         report_path = generate_report(tracks, output_dir, video_name, source)
-        print(f'  Report: {report_path}')
+        if json_progress:
+            emit_json('report', path=report_path)
+        else:
+            print(f'  Report: {report_path}')
 
     return report_path
 
@@ -169,6 +206,7 @@ Examples:
     parser.add_argument('--stride', type=int, help='Frame skip (2=2x faster)')
     parser.add_argument('--show', action='store_true', help='Live preview')
     parser.add_argument('--config', default='config.yaml', help='Config file')
+    parser.add_argument('--json-progress', action='store_true', help='Output JSON progress (for GUI)')
     args = parser.parse_args()
 
     # Load config
@@ -215,28 +253,43 @@ Examples:
 
     # Select device
     device = 'mps' if torch.backends.mps.is_available() else 'cpu'
-    print(f'Using device: {device}')
+    json_progress = getattr(args, 'json_progress', False)
+
+    if json_progress:
+        emit_json('status', message=f'Using device: {device}')
+        emit_json('status', message=f'Loading {model}...')
+    else:
+        print(f'Using device: {device}')
+        print(f'Loading {model}...')
 
     # Load model once
-    print(f'Loading {model}...')
     yolo = YOLO(model)
     yolo.set_classes(prompts)  # type: ignore[misc]
-    print(f'Detecting: {", ".join(prompts)}')
+
+    if json_progress:
+        emit_json('status', message=f'Detecting: {", ".join(prompts)}')
+        emit_json('status', message=f'Found {len(video_files)} video(s) to process')
+    else:
+        print(f'Detecting: {", ".join(prompts)}')
+        print(f'\nFound {len(video_files)} video(s) to process')
 
     # Process each video
-    print(f'\nFound {len(video_files)} video(s) to process')
     reports = []
+    total_videos = len(video_files)
 
-    for source in video_files:
-        report_path = process_video(source, yolo, cfg, args)
+    for idx, source in enumerate(video_files, 1):
+        report_path = process_video(source, yolo, cfg, args, video_index=idx, total_videos=total_videos)
         if report_path:
             reports.append(report_path)
 
     # Summary
-    print(f'\n{"="*50}')
-    print(f'Processed {len(video_files)} video(s)')
-    if reports:
-        print(f'Generated {len(reports)} report(s)')
+    if json_progress:
+        emit_json('complete', videos_processed=len(video_files), reports_generated=len(reports))
+    else:
+        print(f'\n{"="*50}')
+        print(f'Processed {len(video_files)} video(s)')
+        if reports:
+            print(f'Generated {len(reports)} report(s)')
 
 
 if __name__ == '__main__':

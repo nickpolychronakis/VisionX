@@ -1,0 +1,80 @@
+:root {
+  --bg-primary: #1a1a2e;
+  --bg-secondary: #16213e;
+  --bg-card: #0f3460;
+  --text-primary: #eaeaea;
+  --text-secondary: #a0a0a0;
+  --accent: #e94560;
+  --accent-hover: #ff6b6b;
+  --success: #4ecca3;
+  --border: #2a2a4a;
+}
+
+* {
+  margin: 0;
+  padding: 0;
+  box-sizing: border-box;
+}
+
+html, body, #app {
+  height: 100%;
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Oxygen,
+    Ubuntu, Cantarell, "Open Sans", "Helvetica Neue", sans-serif;
+  background: var(--bg-primary);
+  color: var(--text-primary);
+}
+
+button {
+  cursor: pointer;
+  border: none;
+  border-radius: 6px;
+  padding: 10px 20px;
+  font-size: 14px;
+  font-weight: 500;
+  transition: all 0.2s ease;
+}
+
+button.primary {
+  background: var(--accent);
+  color: white;
+}
+
+button.primary:hover {
+  background: var(--accent-hover);
+}
+
+button.secondary {
+  background: var(--bg-card);
+  color: var(--text-primary);
+  border: 1px solid var(--border);
+}
+
+button.secondary:hover {
+  background: var(--bg-secondary);
+}
+
+button:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+input, select {
+  background: var(--bg-secondary);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 10px 14px;
+  color: var(--text-primary);
+  font-size: 14px;
+}
+
+input:focus, select:focus {
+  outline: none;
+  border-color: var(--accent);
+}
+
+.card {
+  background: var(--bg-card);
+  border-radius: 12px;
+  padding: 20px;
+  border: 1px solid var(--border);
+}
