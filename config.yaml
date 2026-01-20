@@ -1,6 +1,6 @@
 # VisionX Default Configuration
 
-model: yoloe-26x-seg.pt
+model: yoloe-26l-seg.pt
 
 prompts:
   - car
