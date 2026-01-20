@@ -115,6 +115,10 @@ async function startProcessing() {
     });
 
     reports.value = result;
+    // Auto-select first report to show preview
+    if (result.length > 0) {
+      selectedReport.value = result[0];
+    }
     currentView.value = "results";
   } catch (error) {
     const errorStr = String(error);

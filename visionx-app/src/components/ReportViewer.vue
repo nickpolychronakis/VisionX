@@ -33,7 +33,7 @@ watch(selected, async (newPath) => {
   } else {
     reportContent.value = "";
   }
-});
+}, { immediate: true });
 
 async function openInBrowser(report: string) {
   try {
@@ -70,26 +70,23 @@ function selectReport(report: string) {
           @click="selectReport(report)"
         >
           <span class="report-name">{{ getFileName(report) }}</span>
-          <button class="open-btn" @click.stop="openInBrowser(report)">
-            Open in Browser
-          </button>
         </li>
       </ul>
       <p v-else class="no-reports">No reports generated yet.</p>
 
-      <div class="list-actions">
-        <button class="secondary" @click="openFolder" :disabled="!hasReports">
-          Open Folder
-        </button>
-      </div>
     </div>
 
     <div v-if="selected" class="report-preview card">
       <div class="preview-header">
         <h3>Preview: {{ getFileName(selected) }}</h3>
-        <button class="secondary" @click="openInBrowser(selected)">
-          Open in Browser
-        </button>
+        <div class="preview-actions">
+          <button class="secondary" @click="openFolder">
+            Open Folder
+          </button>
+          <button class="secondary" @click="openInBrowser(selected)">
+            Open in Browser
+          </button>
+        </div>
       </div>
       <div class="preview-frame">
         <div v-if="loadingPreview" class="placeholder">
@@ -151,29 +148,10 @@ function selectReport(report: string) {
   font-size: 0.9rem;
 }
 
-.open-btn {
-  background: transparent;
-  color: var(--accent);
-  padding: 4px 10px;
-  font-size: 0.8rem;
-  border: 1px solid var(--accent);
-}
-
-.open-btn:hover {
-  background: var(--accent);
-  color: white;
-}
-
 .no-reports {
   color: var(--text-secondary);
   text-align: center;
   padding: 20px;
-}
-
-.list-actions {
-  margin-top: 16px;
-  display: flex;
-  justify-content: flex-end;
 }
 
 .report-preview {
@@ -190,6 +168,11 @@ function selectReport(report: string) {
 
 .preview-header h3 {
   font-size: 0.95rem;
+}
+
+.preview-actions {
+  display: flex;
+  gap: 8px;
 }
 
 .preview-frame {
