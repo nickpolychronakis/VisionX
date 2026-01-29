@@ -1,7 +1,20 @@
 <script setup lang="ts">
+import { ref, onMounted } from "vue";
+import { getVersion } from "@tauri-apps/api/app";
+
 const emit = defineEmits<{
   start: [];
 }>();
+
+const appVersion = ref("");
+
+onMounted(async () => {
+  try {
+    appVersion.value = await getVersion();
+  } catch (e) {
+    console.error("Failed to get version:", e);
+  }
+});
 </script>
 
 <template>
@@ -83,6 +96,7 @@ const emit = defineEmits<{
       <p class="contact">
         Επικοινωνία: <a href="mailto:nickpolychronakis@me.com">nickpolychronakis@me.com</a>
       </p>
+      <p v-if="appVersion" class="version">Έκδοση {{ appVersion }}</p>
     </footer>
   </div>
 </template>
@@ -218,5 +232,12 @@ const emit = defineEmits<{
 
 .contact a:hover {
   text-decoration: underline;
+}
+
+.version {
+  margin-top: 8px;
+  font-size: 0.8rem;
+  color: var(--text-secondary);
+  opacity: 0.7;
 }
 </style>
