@@ -110,17 +110,23 @@ function selectReport(report: string) {
 .report-viewer {
   display: flex;
   flex-direction: column;
-  gap: 20px;
+  gap: 16px;
+  flex: 1;
+  overflow: hidden;
+}
+
+.reports-list {
+  flex-shrink: 0;
 }
 
 .reports-list h3 {
-  margin-bottom: 16px;
-  font-size: 1rem;
+  margin-bottom: 12px;
+  font-size: 0.95rem;
 }
 
 .reports-list ul {
   list-style: none;
-  max-height: 200px;
+  max-height: 120px;
   overflow-y: auto;
 }
 
@@ -157,17 +163,20 @@ function selectReport(report: string) {
 .report-preview {
   display: flex;
   flex-direction: column;
+  flex: 1;
+  overflow: hidden;
 }
 
 .preview-header {
   display: flex;
   justify-content: space-between;
   align-items: center;
-  margin-bottom: 16px;
+  margin-bottom: 12px;
+  flex-shrink: 0;
 }
 
 .preview-header h3 {
-  font-size: 0.95rem;
+  font-size: 0.9rem;
 }
 
 .preview-actions {
@@ -178,7 +187,8 @@ function selectReport(report: string) {
 .preview-frame {
   background: var(--bg-secondary);
   border-radius: 8px;
-  min-height: 400px;
+  flex: 1;
+  min-height: 200px;
   display: flex;
   align-items: center;
   justify-content: center;
@@ -187,7 +197,7 @@ function selectReport(report: string) {
 
 .report-iframe {
   width: 100%;
-  height: 400px;
+  height: 100%;
   border: none;
   border-radius: 8px;
   background: white;

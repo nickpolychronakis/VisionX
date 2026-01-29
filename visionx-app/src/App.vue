@@ -240,6 +240,9 @@ function startNew() {
 
 <style scoped>
 .app {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
   max-width: 900px;
   margin: 0 auto;
   padding: 20px;
@@ -249,8 +252,9 @@ function startNew() {
   display: flex;
   justify-content: center;
   align-items: center;
-  margin-bottom: 30px;
+  padding-bottom: 20px;
   position: relative;
+  flex-shrink: 0;
 }
 
 .header-content {
@@ -297,6 +301,8 @@ function startNew() {
   display: flex;
   flex-direction: column;
   gap: 20px;
+  flex: 1;
+  overflow: hidden;
 }
 
 .view-select,
@@ -305,6 +311,13 @@ function startNew() {
   display: flex;
   flex-direction: column;
   gap: 20px;
+  flex: 1;
+  overflow: hidden;
+}
+
+.view-processing {
+  justify-content: center;
+  align-items: center;
 }
 
 .selected-files h3 {
@@ -312,9 +325,17 @@ function startNew() {
   font-size: 1rem;
 }
 
+.selected-files {
+  flex-shrink: 0;
+  max-height: 150px;
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+}
+
 .file-list {
   list-style: none;
-  max-height: 200px;
+  flex: 1;
   overflow-y: auto;
 }
 

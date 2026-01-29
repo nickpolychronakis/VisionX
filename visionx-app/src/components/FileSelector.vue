@@ -100,9 +100,10 @@ async function selectFolder() {
   display: flex;
   flex-direction: column;
   align-items: center;
-  padding: 40px 20px;
+  padding: 24px 20px;
   border: 2px dashed var(--border);
   transition: all 0.2s ease;
+  flex-shrink: 0;
 }
 
 .file-selector.dragging {
@@ -112,28 +113,33 @@ async function selectFolder() {
 
 .icon {
   color: var(--text-secondary);
-  margin-bottom: 16px;
+  margin-bottom: 10px;
+}
+
+.icon svg {
+  width: 36px;
+  height: 36px;
 }
 
 .instruction {
-  font-size: 1rem;
-  margin-bottom: 8px;
+  font-size: 0.95rem;
+  margin-bottom: 6px;
 }
 
 .or {
   color: var(--text-secondary);
-  font-size: 0.85rem;
-  margin-bottom: 16px;
+  font-size: 0.8rem;
+  margin-bottom: 10px;
 }
 
 .buttons {
   display: flex;
-  gap: 12px;
-  margin-bottom: 16px;
+  gap: 10px;
+  margin-bottom: 10px;
 }
 
 .formats {
-  font-size: 0.75rem;
+  font-size: 0.7rem;
   color: var(--text-secondary);
 }
 </style>
