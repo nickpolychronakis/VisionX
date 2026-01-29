@@ -4,6 +4,7 @@
 import argparse
 import base64
 import json
+import sys
 import yaml
 import cv2
 import torch
@@ -46,6 +47,44 @@ def emit_json(event_type: str, **data):
     print(json.dumps(event), flush=True)
 
 
+def get_coreml_model_path(pt_model: str) -> Path | None:
+    """Get CoreML model path if it exists (macOS only)"""
+    if sys.platform != 'darwin':
+        return None
+    mlpackage = Path(pt_model).with_suffix('.mlpackage')
+    return mlpackage if mlpackage.exists() else None
+
+
+def export_to_coreml(pt_model: str, prompts: list[str], json_progress: bool = False) -> Path | None:
+    """Export PyTorch model to CoreML (macOS only, one-time operation).
+
+    Classes must be set before export as CoreML models have fixed classes.
+    """
+    if sys.platform != 'darwin':
+        return None
+
+    mlpackage = Path(pt_model).with_suffix('.mlpackage')
+    if mlpackage.exists():
+        return mlpackage
+
+    if json_progress:
+        emit_json('status', message='Exporting to CoreML (one-time)...')
+    else:
+        print('Exporting to CoreML (one-time, may take a few minutes)...')
+
+    try:
+        model = YOLO(pt_model)
+        model.set_classes(prompts)  # type: ignore[misc]  # Bake classes into CoreML model
+        model.export(format="coreml")
+        return mlpackage if mlpackage.exists() else None
+    except Exception as e:
+        if json_progress:
+            emit_json('status', message=f'CoreML export failed: {e}')
+        else:
+            print(f'CoreML export failed: {e}')
+        return None
+
+
 def process_video(source: str, yolo: YOLO, cfg: dict, args, video_index: int = 1, total_videos: int = 1) -> str | None:
     """Process a single video and return report path if generated"""
     source_path = Path(source)
@@ -65,8 +104,16 @@ def process_video(source: str, yolo: YOLO, cfg: dict, args, video_index: int = 1
     stride = args.stride or cfg['vid_stride']
     show = args.show or cfg['show']
 
-    # Device
-    device = 'mps' if torch.backends.mps.is_available() else 'cpu'
+    # Device - CoreML handles device selection automatically
+    model_path = str(getattr(yolo, 'ckpt_path', ''))
+    if model_path.endswith('.mlpackage'):
+        device = None  # CoreML uses Neural Engine + GPU + CPU automatically
+    elif torch.cuda.is_available():
+        device = 'cuda'
+    elif torch.backends.mps.is_available():
+        device = 'mps'
+    else:
+        device = 'cpu'
 
     # Get video info
     cap = cv2.VideoCapture(source)
@@ -238,8 +285,16 @@ def process_video_chain(sources: list[str], yolo: YOLO, cfg: dict, args) -> str 
     show = args.show or cfg['show']
     save_report = cfg['save_report']
 
-    # Device
-    device = 'mps' if torch.backends.mps.is_available() else 'cpu'
+    # Device - CoreML handles device selection automatically
+    model_path = str(getattr(yolo, 'ckpt_path', ''))
+    if model_path.endswith('.mlpackage'):
+        device = None  # CoreML uses Neural Engine + GPU + CPU automatically
+    elif torch.cuda.is_available():
+        device = 'cuda'
+    elif torch.backends.mps.is_available():
+        device = 'mps'
+    else:
+        device = 'cpu'
 
     # Calculate total frames across all videos
     video_info = []
@@ -457,23 +512,42 @@ Examples:
         return
 
     # Get settings for model loading
-    model = args.model or cfg['model']
+    model_path = args.model or cfg['model']
     prompts = args.search or cfg['prompts']
-
-    # Select device
-    device = 'mps' if torch.backends.mps.is_available() else 'cpu'
     json_progress = getattr(args, 'json_progress', False)
 
-    if json_progress:
-        emit_json('status', message=f'Using device: {device}')
-        emit_json('status', message=f'Loading {model}...')
+    # macOS: Try CoreML for Neural Engine acceleration
+    using_coreml = False
+    if sys.platform == 'darwin':
+        coreml_path = get_coreml_model_path(model_path)
+        if coreml_path is None:
+            coreml_path = export_to_coreml(model_path, prompts, json_progress)
+
+        if coreml_path and coreml_path.exists():
+            model_path = str(coreml_path)
+            using_coreml = True
+
+    # Determine device name for display (actual device selection happens in processing functions)
+    if using_coreml:
+        device_name = 'CoreML (Neural Engine)'
+    elif torch.cuda.is_available():
+        device_name = 'CUDA'
+    elif torch.backends.mps.is_available():
+        device_name = 'MPS (Metal)'
     else:
-        print(f'Using device: {device}')
-        print(f'Loading {model}...')
+        device_name = 'CPU'
+
+    if json_progress:
+        emit_json('status', message=f'Using: {device_name}')
+        emit_json('status', message=f'Loading {Path(model_path).name}...')
+    else:
+        print(f'Using: {device_name}')
+        print(f'Loading {Path(model_path).name}...')
 
     # Load model once
-    yolo = YOLO(model)
-    yolo.set_classes(prompts)  # type: ignore[misc]
+    yolo = YOLO(model_path)
+    if not using_coreml:
+        yolo.set_classes(prompts)  # type: ignore[misc]  # CoreML has classes baked in during export
 
     if json_progress:
         emit_json('status', message=f'Detecting: {", ".join(prompts)}')
