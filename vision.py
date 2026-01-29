@@ -201,6 +201,194 @@ def process_video(source: str, yolo: YOLO, cfg: dict, args, video_index: int = 1
     return report_path
 
 
+def get_video_fps(source: str) -> tuple[int, float]:
+    """Get total frames and actual fps for a video"""
+    cap = cv2.VideoCapture(source)
+    total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+    fps_metadata = cap.get(cv2.CAP_PROP_FPS)
+
+    # Calculate actual fps (metadata is often wrong for security cameras)
+    frames_to_check = 0
+    pos_sec = 0
+    while frames_to_check < 100:
+        ret, _ = cap.read()
+        if not ret:
+            break
+        frames_to_check += 1
+        pos_sec = cap.get(cv2.CAP_PROP_POS_MSEC) / 1000
+        if pos_sec >= 5:
+            break
+
+    if pos_sec > 0 and frames_to_check > 0:
+        fps = frames_to_check / pos_sec
+    else:
+        fps = fps_metadata
+
+    cap.release()
+    return total_frames, fps
+
+
+def process_video_chain(sources: list[str], yolo: YOLO, cfg: dict, args) -> str | None:
+    """Process multiple videos as a continuous chain with persistent tracking"""
+    json_progress = getattr(args, 'json_progress', False)
+
+    # Get settings
+    conf = args.conf or cfg['confidence']
+    stride = args.stride or cfg['vid_stride']
+    show = args.show or cfg['show']
+    save_report = cfg['save_report']
+
+    # Device
+    device = 'mps' if torch.backends.mps.is_available() else 'cpu'
+
+    # Calculate total frames across all videos
+    video_info = []
+    total_all_frames = 0
+    for source in sources:
+        total_frames, fps = get_video_fps(source)
+        video_info.append({'source': source, 'frames': total_frames, 'fps': fps})
+        total_all_frames += total_frames
+
+    if json_progress:
+        emit_json('status', message=f'Chain mode: {len(sources)} videos, {total_all_frames} total frames')
+    else:
+        print(f'\nChain mode: Processing {len(sources)} videos as continuous sequence')
+        print(f'Total frames: {total_all_frames}')
+
+    # Track detections across all videos
+    tracks = {}
+    global_frame_num = 0
+    cumulative_time = 0.0
+
+    # Progress bar for all videos combined
+    if not json_progress:
+        pbar = tqdm(total=total_all_frames // stride, desc='  Analyzing chain', unit='frame')
+
+    for video_idx, info in enumerate(video_info):
+        source = info['source']
+        fps = info['fps']
+        source_name = Path(source).name
+
+        if json_progress:
+            emit_json('status', message=f'Processing: {source_name} ({video_idx + 1}/{len(sources)})')
+        else:
+            pbar.set_postfix({'file': source_name[:20]})
+
+        # Open video with OpenCV
+        cap = cv2.VideoCapture(source)
+        frame_in_video = 0
+
+        while True:
+            ret, frame = cap.read()
+            if not ret:
+                break
+
+            frame_in_video += 1
+
+            # Apply stride
+            if stride > 1 and frame_in_video % stride != 0:
+                continue
+
+            global_frame_num += 1
+
+            # Track this frame (persist=True maintains tracker state)
+            results = yolo.track(
+                frame,
+                conf=conf,
+                device=device,
+                persist=True,
+                verbose=False,
+                tracker='tracker.yaml',
+            )
+
+            # Update progress
+            if json_progress:
+                progress_pct = int((global_frame_num / (total_all_frames // stride)) * 100)
+                emit_json('progress',
+                    video=source_name,
+                    frame=global_frame_num,
+                    total_frames=total_all_frames // stride,
+                    video_index=video_idx + 1,
+                    total_videos=len(sources),
+                    fps=fps
+                )
+            else:
+                pbar.update(1)
+
+            # Process detections
+            if save_report and results:
+                result = results[0]
+                boxes = result.boxes
+                if boxes is None or len(boxes) == 0:
+                    continue
+                for i in range(len(boxes)):
+                    box = boxes.xyxy[i]
+                    det_conf = float(boxes.conf[i])
+                    cls_id = int(boxes.cls[i])
+                    class_name = result.names[cls_id]
+
+                    # Get track ID (skip untracked)
+                    if boxes.id is None or boxes.id[i] is None:
+                        continue
+                    track_id = int(boxes.id[i])
+
+                    # Local timestamp within this video
+                    local_timestamp = frame_in_video / fps
+
+                    # Update or create track entry
+                    if track_id not in tracks or det_conf > tracks[track_id]['confidence']:
+                        # Extract thumbnail
+                        x1, y1, x2, y2 = map(int, box.tolist())
+                        h, w = result.orig_img.shape[:2]
+                        box_w, box_h = x2 - x1, y2 - y1
+                        pad_x, pad_y = int(box_w * 0.3), int(box_h * 0.3)
+                        x1, y1 = max(0, x1 - pad_x), max(0, y1 - pad_y)
+                        x2, y2 = min(w, x2 + pad_x), min(h, y2 + pad_y)
+
+                        thumb_b64 = None
+                        if x2 > x1 and y2 > y1:
+                            thumb = result.orig_img[y1:y2, x1:x2]
+                            _, buffer = cv2.imencode('.jpg', thumb, [cv2.IMWRITE_JPEG_QUALITY, 85])
+                            thumb_b64 = base64.b64encode(buffer).decode('utf-8')
+
+                        tracks[track_id] = {
+                            'class': class_name,
+                            'confidence': det_conf,
+                            'first_seen': tracks.get(track_id, {}).get('first_seen', local_timestamp),
+                            'first_seen_file': tracks.get(track_id, {}).get('first_seen_file', source_name),
+                            'last_seen': local_timestamp,
+                            'last_seen_file': source_name,
+                            'thumbnail': thumb_b64,
+                        }
+                    else:
+                        # Update last_seen
+                        tracks[track_id]['last_seen'] = local_timestamp
+                        tracks[track_id]['last_seen_file'] = source_name
+
+        cap.release()
+
+        # Add this video's duration to cumulative time
+        cumulative_time += info['frames'] / fps
+
+    if not json_progress:
+        pbar.close()
+
+    # Generate combined report
+    report_path = None
+    if save_report and tracks:
+        # Use first video's directory and name for report
+        first_video = Path(sources[0])
+        output_dir = args.output or str(first_video.parent)
+        report_name = f"{first_video.stem}_chain"
+        report_path = generate_report(tracks, output_dir, report_name, sources[0])
+        if json_progress:
+            emit_json('report', path=report_path)
+        else:
+            print(f'  Report: {report_path}')
+
+    return report_path
+
+
 def main():
     parser = argparse.ArgumentParser(
         description='VisionX - YOLOE-26 Video Analysis',
@@ -224,6 +412,7 @@ Examples:
     parser.add_argument('--half', action='store_true', help='FP16 mode (faster)')
     parser.add_argument('--stride', type=int, help='Frame skip (2=2x faster)')
     parser.add_argument('--show', action='store_true', help='Live preview')
+    parser.add_argument('--chain', action='store_true', help='Process multiple videos as continuous sequence')
     parser.add_argument('--config', default='config.yaml', help='Config file')
     parser.add_argument('--json-progress', action='store_true', help='Output JSON progress (for GUI)')
     args = parser.parse_args()
@@ -293,14 +482,21 @@ Examples:
         print(f'Detecting: {", ".join(prompts)}')
         print(f'\nFound {len(video_files)} video(s) to process')
 
-    # Process each video
+    # Process videos
     reports = []
     total_videos = len(video_files)
 
-    for idx, source in enumerate(video_files, 1):
-        report_path = process_video(source, yolo, cfg, args, video_index=idx, total_videos=total_videos)
+    if args.chain and len(video_files) > 1:
+        # Chain mode: process all videos as continuous sequence
+        report_path = process_video_chain(video_files, yolo, cfg, args)
         if report_path:
             reports.append(report_path)
+    else:
+        # Normal mode: process each video independently
+        for idx, source in enumerate(video_files, 1):
+            report_path = process_video(source, yolo, cfg, args, video_index=idx, total_videos=total_videos)
+            if report_path:
+                reports.append(report_path)
 
     # Summary
     if json_progress:
@@ -308,6 +504,8 @@ Examples:
     else:
         print(f'\n{"="*50}')
         print(f'Processed {len(video_files)} video(s)')
+        if args.chain and len(video_files) > 1:
+            print(f'Chain mode: combined into 1 report')
         if reports:
             print(f'Generated {len(reports)} report(s)')
 

@@ -22,6 +22,10 @@ python vision.py video1.mp4 video2.mp4 video3.mp4
 # All videos in directory
 python vision.py --dir /path/to/videos
 
+# Chain mode - treat multiple videos as continuous sequence
+python vision.py --chain video_part1.mp4 video_part2.mp4 video_part3.mp4
+python vision.py --dir /path/to/videos --chain
+
 # Custom search prompts
 python vision.py --search "white car" "red motorcycle" video.mp4
 
@@ -37,6 +41,7 @@ python vision.py --half --stride 2 video.mp4
 | Option | Description |
 |--------|-------------|
 | `--dir` | Process all videos in directory |
+| `--chain` | Process multiple videos as continuous sequence |
 | `--search` | Custom detection prompts |
 | `--model` | Model file (default: yoloe-26l-seg.pt) |
 | `--conf` | Confidence threshold (default: 0.5) |

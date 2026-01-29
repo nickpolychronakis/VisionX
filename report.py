@@ -23,6 +23,18 @@ def generate_report(tracks: dict, output_dir: str, video_name: str, video_path: 
         first_ts = format_timestamp(track['first_seen'])
         last_ts = format_timestamp(track['last_seen'])
 
+        # Check if we have file info (chain mode)
+        first_file = track.get('first_seen_file')
+        last_file = track.get('last_seen_file')
+
+        # Format timestamp display
+        if first_file:
+            first_display = f"{first_file} @ {first_ts}"
+            last_display = f"{last_file} @ {last_ts}"
+        else:
+            first_display = first_ts
+            last_display = last_ts
+
         # Use embedded base64 thumbnail
         thumb_src = f"data:image/jpeg;base64,{track['thumbnail']}" if track.get('thumbnail') else ""
 
@@ -33,11 +45,11 @@ def generate_report(tracks: dict, output_dir: str, video_name: str, video_path: 
                 <div class="title">{track['class'].upper()} #{track_id}</div>
                 <div class="confidence">Confidence: {track['confidence']:.0%}</div>
                 <div class="timestamps">
-                    <span class="ts" onclick="copyTimestamp('{first_ts}')" title="Click to copy">
-                        First: {first_ts}
+                    <span class="ts" onclick="copyTimestamp('{first_ts}')" title="Click to copy timestamp">
+                        First: {first_display}
                     </span>
-                    <span class="ts" onclick="copyTimestamp('{last_ts}')" title="Click to copy">
-                        Last: {last_ts}
+                    <span class="ts" onclick="copyTimestamp('{last_ts}')" title="Click to copy timestamp">
+                        Last: {last_display}
                     </span>
                 </div>
             </div>
