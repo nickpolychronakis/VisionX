@@ -23,11 +23,20 @@ jobs:
           - platform: windows-latest
             args: ''
             name: Windows-x64
+          - platform: ubuntu-22.04
+            args: ''
+            name: Linux-x64
 
     runs-on: ${{ matrix.platform }}
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
+
+      - name: Install Linux dependencies
+        if: matrix.platform == 'ubuntu-22.04'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf
 
       - name: Install pnpm
         uses: pnpm/action-setup@v4
@@ -72,6 +81,7 @@ jobs:
             - **macOS (Apple Silicon)**: Download the `.dmg` file for arm64
             - **macOS (Intel)**: Download the `.dmg` file for x64
             - **Windows**: Download the `.exe` or `.msi` installer
+            - **Linux**: Download the `.AppImage` or `.deb` file
           releaseDraft: true
           prerelease: false
           args: ${{ matrix.args }}
