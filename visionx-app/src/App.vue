@@ -155,8 +155,18 @@ function startNew() {
 <template>
   <div class="app">
     <header class="header">
-      <h1>VisionX</h1>
-      <span class="subtitle">Ανίχνευση & Παρακολούθηση Αντικειμένων σε Βίντεο</span>
+      <div class="header-content">
+        <h1>VisionX</h1>
+        <span class="subtitle">Ανίχνευση & Παρακολούθηση Αντικειμένων σε Βίντεο</span>
+      </div>
+      <button
+        v-if="currentView !== 'landing'"
+        class="info-btn"
+        @click="currentView = 'landing'"
+        title="Πληροφορίες"
+      >
+        ℹ️
+      </button>
     </header>
 
     <main class="main">
@@ -236,8 +246,15 @@ function startNew() {
 }
 
 .header {
-  text-align: center;
+  display: flex;
+  justify-content: center;
+  align-items: center;
   margin-bottom: 30px;
+  position: relative;
+}
+
+.header-content {
+  text-align: center;
 }
 
 .header h1 {
@@ -249,6 +266,31 @@ function startNew() {
 .subtitle {
   color: var(--text-secondary);
   font-size: 0.9rem;
+}
+
+.info-btn {
+  position: absolute;
+  right: 0;
+  top: 50%;
+  transform: translateY(-50%);
+  background: transparent;
+  border: 1px solid var(--border);
+  border-radius: 50%;
+  width: 36px;
+  height: 36px;
+  font-size: 1rem;
+  cursor: pointer;
+  transition: all 0.2s ease;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  line-height: 1;
+}
+
+.info-btn:hover {
+  background: var(--bg-secondary);
+  border-color: var(--accent);
 }
 
 .main {

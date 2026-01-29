@@ -7,6 +7,7 @@ const emit = defineEmits<{
 <template>
   <div class="landing-page">
     <div class="hero">
+      <img src="/logo.svg" alt="VisionX Logo" class="hero-logo" />
       <h2>Ανάλυση Βίντεο με Τεχνητή Νοημοσύνη</h2>
       <p class="tagline">
         Αυτόματη ανίχνευση και παρακολούθηση αντικειμένων σε βίντεο ασφαλείας
@@ -96,6 +97,12 @@ const emit = defineEmits<{
 .hero {
   text-align: center;
   padding: 20px 0;
+}
+
+.hero-logo {
+  width: 120px;
+  height: 120px;
+  margin-bottom: 16px;
 }
 
 .hero h2 {
