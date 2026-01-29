@@ -10,7 +10,11 @@ import torch
 from pathlib import Path
 from tqdm import tqdm
 from ultralytics import YOLO  # type: ignore[attr-defined]
+from ultralytics.data.utils import IMG_FORMATS, VID_FORMATS
 from report import generate_report
+
+# Add .dav (Dahua DVR format) support - OpenCV can read these
+VID_FORMATS.add('dav')
 
 DEFAULT_CONFIG = {
     'model': 'yoloe-26m-seg.pt',
@@ -231,6 +235,7 @@ Examples:
                 'ts', 'TS', 'mts', 'MTS', 'm2ts', 'M2TS',
                 '3gp', '3GP',
                 'asf', 'ASF',
+                'dav', 'DAV',  # Dahua DVR format
             ]
             video_files = []
             for ext in extensions:
