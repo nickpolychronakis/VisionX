@@ -61,7 +61,7 @@ function selectReport(report: string) {
 <template>
   <div class="report-viewer">
     <div class="reports-list card">
-      <h3>Generated Reports ({{ reports.length }})</h3>
+      <h3>Αναφορές ({{ reports.length }})</h3>
       <ul v-if="hasReports">
         <li
           v-for="report in reports"
@@ -72,25 +72,25 @@ function selectReport(report: string) {
           <span class="report-name">{{ getFileName(report) }}</span>
         </li>
       </ul>
-      <p v-else class="no-reports">No reports generated yet.</p>
+      <p v-else class="no-reports">Δεν έχουν δημιουργηθεί αναφορές ακόμα.</p>
 
     </div>
 
     <div v-if="selected" class="report-preview card">
       <div class="preview-header">
-        <h3>Preview: {{ getFileName(selected) }}</h3>
+        <h3>Προεπισκόπηση: {{ getFileName(selected) }}</h3>
         <div class="preview-actions">
           <button class="secondary" @click="openFolder">
-            Open Folder
+            Άνοιγμα Φακέλου
           </button>
           <button class="secondary" @click="openInBrowser(selected)">
-            Open in Browser
+            Άνοιγμα στον Browser
           </button>
         </div>
       </div>
       <div class="preview-frame">
         <div v-if="loadingPreview" class="placeholder">
-          <p>Loading preview...</p>
+          <p>Φόρτωση προεπισκόπησης...</p>
         </div>
         <iframe
           v-else-if="reportContent"
@@ -98,8 +98,8 @@ function selectReport(report: string) {
           class="report-iframe"
         ></iframe>
         <div v-else class="placeholder">
-          <p>Could not load preview.</p>
-          <p class="hint">Click "Open in Browser" for full functionality.</p>
+          <p>Αδυναμία φόρτωσης προεπισκόπησης.</p>
+          <p class="hint">Πατήστε "Άνοιγμα στον Browser" για πλήρη λειτουργικότητα.</p>
         </div>
       </div>
     </div>

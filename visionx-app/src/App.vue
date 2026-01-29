@@ -2,23 +2,24 @@
 import { ref, computed, onMounted, onUnmounted } from "vue";
 import { invoke } from "@tauri-apps/api/core";
 import { listen, UnlistenFn } from "@tauri-apps/api/event";
+import LandingPage from "./components/LandingPage.vue";
 import FileSelector from "./components/FileSelector.vue";
 import SettingsPanel from "./components/SettingsPanel.vue";
 import ProgressBar from "./components/ProgressBar.vue";
 import ReportViewer from "./components/ReportViewer.vue";
 
 // App state
-type AppView = "select" | "processing" | "results";
-const currentView = ref<AppView>("select");
+type AppView = "landing" | "select" | "processing" | "results";
+const currentView = ref<AppView>("landing");
 
 // Selected files
 const selectedFiles = ref<string[]>([]);
 
 // Settings
 const settings = ref({
-  confidence: 0.25,
+  confidence: 0.65,
   stride: 1,
-  halfPrecision: true,
+  halfPrecision: false,
   outputDir: "",
   searchPrompts: [] as string[],
 });
@@ -155,22 +156,28 @@ function startNew() {
   <div class="app">
     <header class="header">
       <h1>VisionX</h1>
-      <span class="subtitle">Video Object Detection & Tracking</span>
+      <span class="subtitle">Ανίχνευση & Παρακολούθηση Αντικειμένων σε Βίντεο</span>
     </header>
 
     <main class="main">
       <!-- Error Message -->
       <div v-if="processingError" class="error-message card">
-        <strong>Error:</strong> {{ processingError }}
+        <strong>Σφάλμα:</strong> {{ processingError }}
         <button class="dismiss-btn" @click="processingError = null">×</button>
       </div>
 
+      <!-- Landing Page -->
+      <LandingPage
+        v-if="currentView === 'landing'"
+        @start="currentView = 'select'"
+      />
+
       <!-- File Selection View -->
-      <div v-if="currentView === 'select'" class="view-select">
+      <div v-else-if="currentView === 'select'" class="view-select">
         <FileSelector @files-selected="onFilesSelected" />
 
         <div v-if="selectedFiles.length > 0" class="selected-files card">
-          <h3>Selected Videos ({{ selectedFiles.length }})</h3>
+          <h3>Επιλεγμένα Βίντεο ({{ selectedFiles.length }})</h3>
           <ul class="file-list">
             <li v-for="(file, index) in selectedFiles" :key="file">
               <span class="file-name">{{ file.split('/').pop() }}</span>
@@ -187,7 +194,7 @@ function startNew() {
             :disabled="!canProcess"
             @click="startProcessing"
           >
-            Start Processing
+            Έναρξη Επεξεργασίας
           </button>
         </div>
       </div>
@@ -203,7 +210,7 @@ function startNew() {
           :fps="progress.fps"
         />
         <div class="actions">
-          <button class="secondary" @click="cancelProcessing">Cancel</button>
+          <button class="secondary" @click="cancelProcessing">Ακύρωση</button>
         </div>
       </div>
 
@@ -214,7 +221,7 @@ function startNew() {
           v-model:selected="selectedReport"
         />
         <div class="actions">
-          <button class="primary" @click="startNew">Process More Videos</button>
+          <button class="primary" @click="startNew">Επεξεργασία Νέων Βίντεο</button>
         </div>
       </div>
     </main>

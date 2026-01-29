@@ -31,15 +31,15 @@ const videoName = computed(() => {
 <template>
   <div class="progress-container card">
     <div class="current-video">
-      <span class="label">Processing:</span>
+      <span class="label">Επεξεργασία:</span>
       <span class="video-name">{{ videoName }}</span>
     </div>
 
     <!-- Loading indicator when totalFrames is 0 -->
     <div v-if="totalFrames === 0" class="loading-section">
       <div class="spinner"></div>
-      <p>Initializing... This may take a moment to load the model.</p>
-      <p class="hint">The video will be analyzed after the model loads.</p>
+      <p>Αρχικοποίηση... Η φόρτωση του μοντέλου μπορεί να πάρει λίγο χρόνο.</p>
+      <p class="hint">Η ανάλυση θα ξεκινήσει μόλις φορτωθεί το μοντέλο.</p>
     </div>
 
     <!-- Progress bars only shown when we have frame data -->
@@ -47,7 +47,7 @@ const videoName = computed(() => {
       <!-- Current video progress -->
       <div class="progress-section">
         <div class="progress-header">
-          <span>Frame Progress</span>
+          <span>Πρόοδος Καρέ</span>
           <span>{{ currentFrame }} / {{ totalFrames }} ({{ framePercent }}%)</span>
         </div>
         <div class="progress-bar">
@@ -58,8 +58,8 @@ const videoName = computed(() => {
       <!-- Overall progress -->
       <div class="progress-section">
         <div class="progress-header">
-          <span>Overall Progress</span>
-          <span>Video {{ videoIndex }} of {{ totalVideos }} ({{ overallPercent }}%)</span>
+          <span>Συνολική Πρόοδος</span>
+          <span>Βίντεο {{ videoIndex }} από {{ totalVideos }} ({{ overallPercent }}%)</span>
         </div>
         <div class="progress-bar overall">
           <div class="progress-fill" :style="{ width: overallPercent + '%' }"></div>

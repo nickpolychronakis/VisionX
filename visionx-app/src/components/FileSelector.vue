@@ -85,13 +85,13 @@ async function selectFolder() {
         <line x1="12" y1="3" x2="12" y2="15" />
       </svg>
     </div>
-    <p class="instruction">Drag & drop video files here</p>
-    <p class="or">or</p>
+    <p class="instruction">Σύρετε αρχεία βίντεο εδώ</p>
+    <p class="or">ή</p>
     <div class="buttons">
-      <button class="primary" @click="selectFiles">Select Files</button>
-      <button class="secondary" @click="selectFolder">Select Folder</button>
+      <button class="primary" @click="selectFiles">Επιλογή Αρχείων</button>
+      <button class="secondary" @click="selectFolder">Επιλογή Φακέλου</button>
     </div>
-    <p class="formats">Supported: MP4, AVI, MOV, MKV, WMV, WebM, and more</p>
+    <p class="formats">Υποστηρίζονται: MP4, AVI, MOV, MKV, WMV, WebM και άλλα</p>
   </div>
 </template>
 

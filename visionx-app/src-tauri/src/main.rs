@@ -5,7 +5,7 @@ use std::process::{Command, Stdio, Child};
 use std::io::{BufRead, BufReader};
 use std::thread;
 use std::sync::{Arc, Mutex};
-use tauri::{AppHandle, Emitter, Manager};
+use tauri::{AppHandle, Emitter};
 use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Serialize)]
@@ -61,7 +61,6 @@ async fn process_videos(
     // Build command arguments
     let mut args = vec![
         "--json-progress".to_string(),
-        "--report".to_string(),
         "--conf".to_string(),
         config.confidence.to_string(),
         "--stride".to_string(),

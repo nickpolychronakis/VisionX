@@ -29,7 +29,7 @@ function removePrompt(index: number) {
 <template>
   <div class="settings-panel card">
     <button class="toggle-btn" @click="isExpanded = !isExpanded">
-      <span>Settings</span>
+      <span>Ρυθμίσεις</span>
       <span class="arrow" :class="{ expanded: isExpanded }">▼</span>
     </button>
 
@@ -37,7 +37,7 @@ function removePrompt(index: number) {
       <!-- Confidence -->
       <div class="setting-row">
         <label>
-          <span class="label-text">Confidence Threshold</span>
+          <span class="label-text">Κατώφλι Εμπιστοσύνης</span>
           <span class="label-value">{{ settings.confidence.toFixed(2) }}</span>
         </label>
         <input
@@ -52,8 +52,8 @@ function removePrompt(index: number) {
       <!-- Stride -->
       <div class="setting-row">
         <label>
-          <span class="label-text">Frame Stride</span>
-          <span class="label-value">Every {{ settings.stride }} frame(s)</span>
+          <span class="label-text">Βήμα Καρέ</span>
+          <span class="label-value">Κάθε {{ settings.stride }} καρέ</span>
         </label>
         <input
           type="range"
@@ -68,23 +68,23 @@ function removePrompt(index: number) {
       <div class="setting-row checkbox">
         <label>
           <input type="checkbox" v-model="settings.halfPrecision" />
-          <span class="label-text">Half Precision (FP16) - Faster processing</span>
+          <span class="label-text">Μισή Ακρίβεια (FP16) - Ταχύτερη επεξεργασία</span>
         </label>
       </div>
 
       <!-- Custom Search Prompts -->
       <div class="setting-row">
         <label>
-          <span class="label-text">Custom Search Prompts (optional)</span>
+          <span class="label-text">Προσαρμοσμένη Αναζήτηση (προαιρετικό)</span>
         </label>
         <div class="prompts-input">
           <input
             type="text"
             v-model="newPrompt"
-            placeholder="e.g., white car, red motorcycle"
+            placeholder="π.χ. λευκό αυτοκίνητο, κόκκινη μοτοσικλέτα"
             @keyup.enter="addPrompt"
           />
-          <button class="secondary" @click="addPrompt">Add</button>
+          <button class="secondary" @click="addPrompt">Προσθήκη</button>
         </div>
         <div v-if="settings.searchPrompts.length > 0" class="prompts-list">
           <span
