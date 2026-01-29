@@ -1,15 +1,14 @@
-# VisionX Tracker Configuration (BoT-SORT with ReID)
+# VisionX Tracker Configuration (BoT-SORT)
 # Optimized for stationary object tracking
 
 tracker_type: botsort
 track_high_thresh: 0.25
 track_low_thresh: 0.1
 new_track_thresh: 0.25
-track_buffer: 150
+track_buffer: 300          # 10 sec at 30fps - critical for stationary objects
 match_thresh: 0.7
 fuse_score: true
 gmc_method: sparseOptFlow
 proximity_thresh: 0.5
 appearance_thresh: 0.5
-with_reid: true
-model: auto
+with_reid: false           # Disabled - track_buffer is more important for stationary
