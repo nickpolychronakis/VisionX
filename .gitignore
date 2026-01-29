@@ -5,3 +5,6 @@ output/
 *.pt
 *.mlpackage/
 .DS_Store
+
+# Large model files (TorchScript)
+mobileclip2_b.ts
