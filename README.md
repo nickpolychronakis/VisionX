@@ -43,7 +43,6 @@ python vision.py --half --stride 2 video.mp4
 | `--output` | Output directory |
 | `--video` | Save annotated video (debug) |
 | `--crops` | Save cropped detections |
-| `--report` | Generate HTML report (default: on) |
 | `--half` | FP16 mode (faster) |
 | `--stride` | Frame skip (2 = 2x faster) |
 | `--show` | Live preview window |

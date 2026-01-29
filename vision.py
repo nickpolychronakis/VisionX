@@ -59,7 +59,7 @@ def process_video(source: str, yolo: YOLO, cfg: dict, args, video_index: int = 1
     # Get settings
     conf = args.conf or cfg['confidence']
     save_crops = args.crops or cfg['save_crops']
-    save_report = args.report or cfg['save_report']
+    save_report = cfg['save_report']
     save_video = args.video or cfg['save_video']
     half = args.half or cfg['half']
     stride = args.stride or cfg['vid_stride']
@@ -71,7 +71,24 @@ def process_video(source: str, yolo: YOLO, cfg: dict, args, video_index: int = 1
     # Get video info
     cap = cv2.VideoCapture(source)
     total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-    fps = cap.get(cv2.CAP_PROP_FPS)
+    fps_metadata = cap.get(cv2.CAP_PROP_FPS)
+
+    # Calculate actual fps (metadata is often wrong for security cameras)
+    frames_to_check = 0
+    while frames_to_check < 100:
+        ret, _ = cap.read()
+        if not ret:
+            break
+        frames_to_check += 1
+        pos_sec = cap.get(cv2.CAP_PROP_POS_MSEC) / 1000
+        if pos_sec >= 5:  # Check first 5 seconds
+            break
+
+    if pos_sec > 0 and frames_to_check > 0:
+        fps = frames_to_check / pos_sec
+    else:
+        fps = fps_metadata
+
     cap.release()
 
     if total_frames == 0:
@@ -96,6 +113,7 @@ def process_video(source: str, yolo: YOLO, cfg: dict, args, video_index: int = 1
         show=show,
         stream=True,
         verbose=False,
+        tracker='tracker.yaml',
     )
 
     # Track detections for report (with embedded thumbnails)
@@ -134,12 +152,10 @@ def process_video(source: str, yolo: YOLO, cfg: dict, args, video_index: int = 1
                 cls_id = int(result.boxes.cls[i])
                 class_name = result.names[cls_id]
 
-                # Get track ID if available
-                track_id = None
-                if result.boxes.id is not None:
-                    track_id = int(result.boxes.id[i])
-                if track_id is None:
-                    track_id = f"unk_{frame_num}_{i}"
+                # Get track ID if available (skip untracked detections)
+                if result.boxes.id is None or result.boxes.id[i] is None:
+                    continue
+                track_id = int(result.boxes.id[i])
 
                 timestamp = (frame_num * stride) / fps
 
@@ -204,7 +220,6 @@ Examples:
     parser.add_argument('--conf', type=float, help='Confidence threshold')
     parser.add_argument('--output', '-o', help='Output directory')
     parser.add_argument('--crops', action='store_true', help='Save cropped detections')
-    parser.add_argument('--report', action='store_true', help='Generate HTML report')
     parser.add_argument('--video', action='store_true', help='Save annotated video')
     parser.add_argument('--half', action='store_true', help='FP16 mode (faster)')
     parser.add_argument('--stride', type=int, help='Frame skip (2=2x faster)')
