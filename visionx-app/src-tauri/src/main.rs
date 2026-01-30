@@ -245,6 +245,134 @@ fn open_file(path: String) -> Result<(), String> {
     Ok(())
 }
 
+#[derive(Clone, Serialize)]
+struct UpdateInfo {
+    available: bool,
+    version: String,
+    current_version: String,
+    download_url: String,
+    can_auto_update: bool,
+}
+
+#[tauri::command]
+async fn check_for_updates(app: AppHandle) -> Result<UpdateInfo, String> {
+    let current_version = app.package_info().version.to_string();
+
+    // On macOS, we can't auto-update without code signing, so just check GitHub API
+    #[cfg(target_os = "macos")]
+    {
+        // Fetch latest release from GitHub API
+        let client = reqwest::Client::new();
+        let response = client
+            .get("https://api.github.com/repos/nickpolychronakis/VisionX/releases/latest")
+            .header("User-Agent", "VisionX-App")
+            .send()
+            .await
+            .map_err(|e| format!("Failed to check for updates: {}", e))?;
+
+        let release: serde_json::Value = response
+            .json()
+            .await
+            .map_err(|e| format!("Failed to parse release info: {}", e))?;
+
+        let latest_version = release["tag_name"]
+            .as_str()
+            .unwrap_or("v0.0.0")
+            .trim_start_matches('v')
+            .to_string();
+
+        // Find the .dmg asset for download
+        let download_url = release["assets"]
+            .as_array()
+            .and_then(|assets| {
+                assets.iter().find(|a| {
+                    a["name"].as_str().map(|n| n.ends_with(".dmg")).unwrap_or(false)
+                })
+            })
+            .and_then(|asset| asset["browser_download_url"].as_str())
+            .unwrap_or("")
+            .to_string();
+
+        let available = version_compare(&latest_version, &current_version);
+
+        return Ok(UpdateInfo {
+            available,
+            version: latest_version,
+            current_version,
+            download_url,
+            can_auto_update: false,
+        });
+    }
+
+    // On Windows/Linux, use the built-in updater
+    #[cfg(not(target_os = "macos"))]
+    {
+        use tauri_plugin_updater::UpdaterExt;
+        let updater = app.updater().map_err(|e| format!("Updater error: {}", e))?;
+
+        match updater.check().await {
+            Ok(Some(update)) => {
+                Ok(UpdateInfo {
+                    available: true,
+                    version: update.version.clone(),
+                    current_version,
+                    download_url: String::new(),
+                    can_auto_update: true,
+                })
+            }
+            Ok(None) => {
+                Ok(UpdateInfo {
+                    available: false,
+                    version: current_version.clone(),
+                    current_version,
+                    download_url: String::new(),
+                    can_auto_update: true,
+                })
+            }
+            Err(e) => Err(format!("Failed to check for updates: {}", e)),
+        }
+    }
+}
+
+fn version_compare(latest: &str, current: &str) -> bool {
+    let parse_version = |v: &str| -> Vec<u32> {
+        v.split('.')
+            .filter_map(|s| s.parse().ok())
+            .collect()
+    };
+
+    let latest_parts = parse_version(latest);
+    let current_parts = parse_version(current);
+
+    for i in 0..latest_parts.len().max(current_parts.len()) {
+        let l = latest_parts.get(i).copied().unwrap_or(0);
+        let c = current_parts.get(i).copied().unwrap_or(0);
+        if l > c { return true; }
+        if l < c { return false; }
+    }
+    false
+}
+
+#[tauri::command]
+async fn install_update(_app: AppHandle) -> Result<(), String> {
+    #[cfg(target_os = "macos")]
+    {
+        return Err("Auto-update not available on macOS. Please download manually.".to_string());
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    {
+        use tauri_plugin_updater::UpdaterExt;
+        let updater = _app.updater().map_err(|e| format!("Updater error: {}", e))?;
+
+        if let Some(update) = updater.check().await.map_err(|e| e.to_string())? {
+            update.download_and_install(|_, _| {}, || {}).await.map_err(|e| e.to_string())?;
+        }
+
+        Ok(())
+    }
+}
+
 #[tauri::command]
 fn show_in_folder(path: String) -> Result<(), String> {
     let folder = std::path::Path::new(&path)
@@ -281,8 +409,10 @@ fn main() {
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_fs::init())
         .plugin(tauri_plugin_shell::init())
+        .plugin(tauri_plugin_updater::Builder::new().build())
+        .plugin(tauri_plugin_http::init())
         .manage(Arc::new(Mutex::new(ProcessState::default())))
-        .invoke_handler(tauri::generate_handler![process_videos, cancel_processing, get_report_content, open_file, show_in_folder])
+        .invoke_handler(tauri::generate_handler![process_videos, cancel_processing, get_report_content, open_file, show_in_folder, check_for_updates, install_update])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }

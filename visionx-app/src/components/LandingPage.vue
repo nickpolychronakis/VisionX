@@ -1,12 +1,26 @@
 <script setup lang="ts">
 import { ref, onMounted } from "vue";
 import { getVersion } from "@tauri-apps/api/app";
+import { invoke } from "@tauri-apps/api/core";
+import { open } from "@tauri-apps/plugin-shell";
+
+interface UpdateInfo {
+  available: boolean;
+  version: string;
+  current_version: string;
+  download_url: string;
+  can_auto_update: boolean;
+}
 
 const emit = defineEmits<{
   start: [];
 }>();
 
 const appVersion = ref("");
+const updateInfo = ref<UpdateInfo | null>(null);
+const checkingUpdate = ref(false);
+const installingUpdate = ref(false);
+const updateError = ref("");
 
 onMounted(async () => {
   try {
@@ -15,6 +29,43 @@ onMounted(async () => {
     console.error("Failed to get version:", e);
   }
 });
+
+async function checkForUpdates() {
+  checkingUpdate.value = true;
+  updateError.value = "";
+  updateInfo.value = null;
+
+  try {
+    const info = await invoke<UpdateInfo>("check_for_updates");
+    updateInfo.value = info;
+  } catch (e) {
+    updateError.value = String(e);
+  } finally {
+    checkingUpdate.value = false;
+  }
+}
+
+async function installUpdate() {
+  if (!updateInfo.value) return;
+
+  if (updateInfo.value.can_auto_update) {
+    installingUpdate.value = true;
+    try {
+      await invoke("install_update");
+    } catch (e) {
+      updateError.value = String(e);
+    } finally {
+      installingUpdate.value = false;
+    }
+  } else if (updateInfo.value.download_url) {
+    await open(updateInfo.value.download_url);
+  }
+}
+
+function dismissUpdate() {
+  updateInfo.value = null;
+  updateError.value = "";
+}
 </script>
 
 <template>
@@ -81,7 +132,43 @@ onMounted(async () => {
       <p class="contact">
         Επικοινωνία: <a href="mailto:nickpolychronakis@me.com">nickpolychronakis@me.com</a>
       </p>
-      <p v-if="appVersion" class="version">Έκδοση {{ appVersion }}</p>
+      <div class="version-row">
+        <span v-if="appVersion" class="version">Έκδοση {{ appVersion }}</span>
+        <button
+          class="update-check-btn"
+          @click="checkForUpdates"
+          :disabled="checkingUpdate"
+        >
+          {{ checkingUpdate ? 'Έλεγχος...' : 'Έλεγχος ενημερώσεων' }}
+        </button>
+      </div>
+
+      <!-- Update notification -->
+      <div v-if="updateInfo" class="update-notification" :class="{ available: updateInfo.available }">
+        <template v-if="updateInfo.available">
+          <p><strong>Διαθέσιμη νέα έκδοση: {{ updateInfo.version }}</strong></p>
+          <div class="update-actions">
+            <button
+              class="primary"
+              @click="installUpdate"
+              :disabled="installingUpdate"
+            >
+              {{ installingUpdate ? 'Εγκατάσταση...' : (updateInfo.can_auto_update ? 'Εγκατάσταση' : 'Λήψη') }}
+            </button>
+            <button class="secondary" @click="dismissUpdate">Αργότερα</button>
+          </div>
+        </template>
+        <template v-else>
+          <p>Έχετε την τελευταία έκδοση!</p>
+          <button class="secondary" @click="dismissUpdate">OK</button>
+        </template>
+      </div>
+
+      <!-- Update error -->
+      <div v-if="updateError" class="update-error">
+        <p>{{ updateError }}</p>
+        <button class="secondary" @click="updateError = ''">OK</button>
+      </div>
     </footer>
   </div>
 </template>
@@ -224,10 +311,73 @@ onMounted(async () => {
   text-decoration: underline;
 }
 
-.version {
+.version-row {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 12px;
   margin-top: 4px;
+}
+
+.version {
   font-size: 0.75rem;
   color: var(--text-secondary);
   opacity: 0.7;
+}
+
+.update-check-btn {
+  font-size: 0.7rem;
+  padding: 4px 10px;
+  background: transparent;
+  color: var(--text-secondary);
+  border: 1px solid var(--border);
+}
+
+.update-check-btn:hover:not(:disabled) {
+  color: var(--accent);
+  border-color: var(--accent);
+}
+
+.update-notification {
+  margin-top: 12px;
+  padding: 12px 16px;
+  background: var(--bg-card);
+  border-radius: 8px;
+  border: 1px solid var(--border);
+}
+
+.update-notification.available {
+  border-color: var(--success);
+  background: rgba(78, 204, 163, 0.1);
+}
+
+.update-notification p {
+  margin-bottom: 8px;
+  color: var(--text-primary);
+}
+
+.update-actions {
+  display: flex;
+  gap: 8px;
+  justify-content: center;
+}
+
+.update-actions button {
+  font-size: 0.8rem;
+  padding: 6px 16px;
+}
+
+.update-error {
+  margin-top: 12px;
+  padding: 12px 16px;
+  background: rgba(233, 69, 96, 0.1);
+  border: 1px solid var(--accent);
+  border-radius: 8px;
+}
+
+.update-error p {
+  margin-bottom: 8px;
+  color: var(--accent);
+  font-size: 0.85rem;
 }
 </style>

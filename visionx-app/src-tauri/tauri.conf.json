@@ -46,5 +46,12 @@
       }
     }
   },
-  "plugins": {}
+  "plugins": {
+    "updater": {
+      "endpoints": [
+        "https://github.com/nickpolychronakis/VisionX/releases/latest/download/latest.json"
+      ],
+      "pubkey": "RWRE54xY51PXYdDNuEHPt9FNS8pTpe26eEZh3rKuAnTniEIY8J18kszs"
+    }
+  }
 }
