@@ -60,6 +60,10 @@ jobs:
           if [ "$RUNNER_OS" == "Windows" ]; then SEP=";"; fi
           pyinstaller --onefile --name vision vision.py \
             --hidden-import report \
+            --hidden-import tqdm \
+            --hidden-import yaml \
+            --hidden-import ultralytics \
+            --collect-all ultralytics \
             --add-data "report.py${SEP}."
 
       - name: Place sidecar binary
