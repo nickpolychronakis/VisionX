@@ -20,6 +20,8 @@ const settings = ref({
   confidence: 0.65,
   stride: 1,
   halfPrecision: false,
+  imgsz: 640,
+  parallel: 1,
   outputDir: "",
   searchPrompts: [] as string[],
 });
@@ -110,6 +112,8 @@ async function startProcessing() {
         confidence: settings.value.confidence,
         stride: settings.value.stride,
         half_precision: settings.value.halfPrecision,
+        imgsz: settings.value.imgsz,
+        parallel: settings.value.parallel,
         output_dir: settings.value.outputDir,
         search_prompts: settings.value.searchPrompts,
       },

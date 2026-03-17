@@ -24,6 +24,8 @@ struct ProcessConfig {
     confidence: f32,
     stride: u32,
     half_precision: bool,
+    imgsz: u32,
+    parallel: u32,
     output_dir: String,
     search_prompts: Vec<String>,
 }
@@ -69,6 +71,16 @@ async fn process_videos(
 
     if config.half_precision {
         args.push("--half".to_string());
+    }
+
+    if config.imgsz != 640 {
+        args.push("--imgsz".to_string());
+        args.push(config.imgsz.to_string());
+    }
+
+    if config.parallel > 1 {
+        args.push("--parallel".to_string());
+        args.push(config.parallel.to_string());
     }
 
     if !config.output_dir.is_empty() {

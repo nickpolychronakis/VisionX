@@ -5,6 +5,8 @@ interface Settings {
   confidence: number;
   stride: number;
   halfPrecision: boolean;
+  imgsz: number;
+  parallel: number;
   outputDir: string;
   searchPrompts: string[];
 }
@@ -60,6 +62,34 @@ function removePrompt(index: number) {
           v-model.number="settings.stride"
           min="1"
           max="10"
+          step="1"
+        />
+      </div>
+
+      <!-- Image Size -->
+      <div class="setting-row">
+        <label>
+          <span class="label-text">Μέγεθος Ανάλυσης</span>
+          <span class="label-value">{{ settings.imgsz }}px</span>
+        </label>
+        <select v-model.number="settings.imgsz">
+          <option :value="320">320px - Ταχύτατο</option>
+          <option :value="480">480px - Γρήγορο</option>
+          <option :value="640">640px - Κανονικό</option>
+        </select>
+      </div>
+
+      <!-- Parallel Workers -->
+      <div class="setting-row">
+        <label>
+          <span class="label-text">Παράλληλοι Workers</span>
+          <span class="label-value">{{ settings.parallel === 1 ? 'Σειριακά' : settings.parallel + ' workers' }}</span>
+        </label>
+        <input
+          type="range"
+          v-model.number="settings.parallel"
+          min="1"
+          max="4"
           step="1"
         />
       </div>
@@ -186,6 +216,16 @@ input[type="range"]::-webkit-slider-thumb {
   border-radius: 50%;
   background: var(--accent);
   cursor: pointer;
+}
+
+select {
+  width: 100%;
+  padding: 8px 12px;
+  background: var(--bg-secondary);
+  color: var(--text-primary);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  font-size: 0.9rem;
 }
 
 .prompts-input {

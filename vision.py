@@ -8,6 +8,7 @@ import sys
 import yaml
 import cv2
 import torch
+from concurrent.futures import ProcessPoolExecutor, as_completed
 from pathlib import Path
 from tqdm import tqdm
 from ultralytics import YOLO  # type: ignore[attr-defined]
@@ -25,6 +26,7 @@ DEFAULT_CONFIG = {
     'save_crops': False,
     'save_report': True,
     'half': False,
+    'imgsz': 640,
     'vid_stride': 1,
     'show': False,
 }
@@ -101,6 +103,7 @@ def process_video(source: str, yolo: YOLO, cfg: dict, args, video_index: int = 1
     save_report = cfg['save_report']
     save_video = args.video or cfg['save_video']
     half = args.half or cfg['half']
+    imgsz = args.imgsz or cfg['imgsz']
     stride = args.stride or cfg['vid_stride']
     show = args.show or cfg['show']
 
@@ -156,6 +159,7 @@ def process_video(source: str, yolo: YOLO, cfg: dict, args, video_index: int = 1
         project=output_dir if save_video or save_crops else None,
         name='' if save_video or save_crops else None,
         half=half,
+        imgsz=imgsz,
         vid_stride=stride,
         show=show,
         stream=True,
@@ -208,7 +212,7 @@ def process_video(source: str, yolo: YOLO, cfg: dict, args, video_index: int = 1
 
                 # Update or create track entry (keep best confidence)
                 if track_id not in tracks or det_conf > tracks[track_id]['confidence']:
-                    # Extract thumbnail with 30% padding
+                    # Extract raw thumbnail crop with 30% padding (encode later)
                     x1, y1, x2, y2 = map(int, box.tolist())
                     h, w = result.orig_img.shape[:2]
                     box_w, box_h = x2 - x1, y2 - y1
@@ -216,23 +220,26 @@ def process_video(source: str, yolo: YOLO, cfg: dict, args, video_index: int = 1
                     x1, y1 = max(0, x1 - pad_x), max(0, y1 - pad_y)
                     x2, y2 = min(w, x2 + pad_x), min(h, y2 + pad_y)
 
-                    thumb_b64 = None
+                    thumb_crop = None
                     if x2 > x1 and y2 > y1:
-                        thumb = result.orig_img[y1:y2, x1:x2]
-                        # Encode as base64 JPEG
-                        _, buffer = cv2.imencode('.jpg', thumb, [cv2.IMWRITE_JPEG_QUALITY, 85])
-                        thumb_b64 = base64.b64encode(buffer).decode('utf-8')
+                        thumb_crop = result.orig_img[y1:y2, x1:x2].copy()
 
                     tracks[track_id] = {
                         'class': class_name,
                         'confidence': det_conf,
                         'first_seen': tracks.get(track_id, {}).get('first_seen', timestamp),
                         'last_seen': timestamp,
-                        'thumbnail': thumb_b64,
+                        'thumbnail': thumb_crop,
                     }
                 else:
                     # Always update last_seen
                     tracks[track_id]['last_seen'] = timestamp
+
+    # Batch encode thumbnails (deferred from hot loop)
+    for track_id, track in tracks.items():
+        if track['thumbnail'] is not None:
+            _, buffer = cv2.imencode('.jpg', track['thumbnail'], [cv2.IMWRITE_JPEG_QUALITY, 85])
+            track['thumbnail'] = base64.b64encode(buffer).decode('utf-8')
 
     # Generate HTML report
     report_path = None
@@ -281,8 +288,9 @@ def process_video_chain(sources: list[str], yolo: YOLO, cfg: dict, args) -> str 
 
     # Get settings
     conf = args.conf or cfg['confidence']
+    imgsz = args.imgsz or cfg['imgsz']
     stride = args.stride or cfg['vid_stride']
-    show = args.show or cfg['show']
+    half = args.half or cfg['half']
     save_report = cfg['save_report']
 
     # Device - CoreML handles device selection automatically
@@ -314,6 +322,7 @@ def process_video_chain(sources: list[str], yolo: YOLO, cfg: dict, args) -> str 
     tracks = {}
     global_frame_num = 0
     cumulative_time = 0.0
+    last_progress_pct = -1
 
     # Progress bar for all videos combined
     if not json_progress:
@@ -329,70 +338,60 @@ def process_video_chain(sources: list[str], yolo: YOLO, cfg: dict, args) -> str 
         else:
             pbar.set_postfix({'file': source_name[:20]})
 
-        # Open video with OpenCV
-        cap = cv2.VideoCapture(source)
+        # Use stream mode for optimized video reading (persist=True keeps tracker state)
+        results = yolo.track(
+            source=source,
+            conf=conf,
+            device=device,
+            persist=True,
+            half=half,
+            imgsz=imgsz,
+            vid_stride=stride,
+            stream=True,
+            verbose=False,
+            tracker='tracker.yaml',
+        )
+
         frame_in_video = 0
-
-        while True:
-            ret, frame = cap.read()
-            if not ret:
-                break
-
+        for result in results:
             frame_in_video += 1
-
-            # Apply stride
-            if stride > 1 and frame_in_video % stride != 0:
-                continue
-
             global_frame_num += 1
 
-            # Track this frame (persist=True maintains tracker state)
-            results = yolo.track(
-                frame,
-                conf=conf,
-                device=device,
-                persist=True,
-                verbose=False,
-                tracker='tracker.yaml',
-            )
-
-            # Update progress
+            # Update progress (throttled to avoid flooding)
             if json_progress:
                 progress_pct = int((global_frame_num / (total_all_frames // stride)) * 100)
-                emit_json('progress',
-                    video=source_name,
-                    frame=global_frame_num,
-                    total_frames=total_all_frames // stride,
-                    video_index=video_idx + 1,
-                    total_videos=len(sources),
-                    fps=fps
-                )
+                if progress_pct != last_progress_pct:
+                    emit_json('progress',
+                        video=source_name,
+                        frame=global_frame_num,
+                        total_frames=total_all_frames // stride,
+                        video_index=video_idx + 1,
+                        total_videos=len(sources),
+                        fps=fps
+                    )
+                    last_progress_pct = progress_pct
             else:
                 pbar.update(1)
 
             # Process detections
-            if save_report and results:
-                result = results[0]
-                boxes = result.boxes
-                if boxes is None or len(boxes) == 0:
-                    continue
-                for i in range(len(boxes)):
-                    box = boxes.xyxy[i]
-                    det_conf = float(boxes.conf[i])
-                    cls_id = int(boxes.cls[i])
+            if save_report and result.boxes is not None and len(result.boxes):
+                for i in range(len(result.boxes)):
+                    box = result.boxes.xyxy[i]
+                    det_conf = float(result.boxes.conf[i])
+                    cls_id = int(result.boxes.cls[i])
                     class_name = result.names[cls_id]
 
                     # Get track ID (skip untracked)
-                    if boxes.id is None or boxes.id[i] is None:
+                    if result.boxes.id is None or result.boxes.id[i] is None:
                         continue
-                    track_id = int(boxes.id[i])
+                    track_id = int(result.boxes.id[i])
 
                     # Local timestamp within this video
-                    local_timestamp = frame_in_video / fps
+                    local_timestamp = (frame_in_video * stride) / fps
 
                     # Update or create track entry
                     if track_id not in tracks or det_conf > tracks[track_id]['confidence']:
-                        # Extract thumbnail
+                        # Extract raw thumbnail crop (encode later)
                         x1, y1, x2, y2 = map(int, box.tolist())
                         h, w = result.orig_img.shape[:2]
                         box_w, box_h = x2 - x1, y2 - y1
@@ -400,11 +399,9 @@ def process_video_chain(sources: list[str], yolo: YOLO, cfg: dict, args) -> str 
                         x1, y1 = max(0, x1 - pad_x), max(0, y1 - pad_y)
                         x2, y2 = min(w, x2 + pad_x), min(h, y2 + pad_y)
 
-                        thumb_b64 = None
+                        thumb_crop = None
                         if x2 > x1 and y2 > y1:
-                            thumb = result.orig_img[y1:y2, x1:x2]
-                            _, buffer = cv2.imencode('.jpg', thumb, [cv2.IMWRITE_JPEG_QUALITY, 85])
-                            thumb_b64 = base64.b64encode(buffer).decode('utf-8')
+                            thumb_crop = result.orig_img[y1:y2, x1:x2].copy()
 
                         tracks[track_id] = {
                             'class': class_name,
@@ -413,20 +410,24 @@ def process_video_chain(sources: list[str], yolo: YOLO, cfg: dict, args) -> str 
                             'first_seen_file': tracks.get(track_id, {}).get('first_seen_file', source_name),
                             'last_seen': local_timestamp,
                             'last_seen_file': source_name,
-                            'thumbnail': thumb_b64,
+                            'thumbnail': thumb_crop,
                         }
                     else:
                         # Update last_seen
                         tracks[track_id]['last_seen'] = local_timestamp
                         tracks[track_id]['last_seen_file'] = source_name
 
-        cap.release()
-
         # Add this video's duration to cumulative time
         cumulative_time += info['frames'] / fps
 
     if not json_progress:
         pbar.close()
+
+    # Batch encode thumbnails (deferred from hot loop)
+    for track_id, track in tracks.items():
+        if track['thumbnail'] is not None:
+            _, buffer = cv2.imencode('.jpg', track['thumbnail'], [cv2.IMWRITE_JPEG_QUALITY, 85])
+            track['thumbnail'] = base64.b64encode(buffer).decode('utf-8')
 
     # Generate combined report
     report_path = None
@@ -442,6 +443,25 @@ def process_video_chain(sources: list[str], yolo: YOLO, cfg: dict, args) -> str 
             print(f'  Report: {report_path}')
 
     return report_path
+
+
+def _parallel_worker(worker_args: dict) -> str | None:
+    """Worker function for parallel video processing. Runs in a separate process."""
+    source = worker_args['source']
+    model_path = worker_args['model_path']
+    prompts = worker_args['prompts']
+    using_coreml = worker_args['using_coreml']
+    cfg = worker_args['cfg']
+    args = worker_args['args']
+    video_index = worker_args['video_index']
+    total_videos = worker_args['total_videos']
+
+    # Each worker loads its own model instance
+    yolo = YOLO(model_path)
+    if not using_coreml:
+        yolo.set_classes(prompts)  # type: ignore[misc]
+
+    return process_video(source, yolo, cfg, args, video_index=video_index, total_videos=total_videos)
 
 
 def main():
@@ -466,7 +486,9 @@ Examples:
     parser.add_argument('--video', action='store_true', help='Save annotated video')
     parser.add_argument('--half', action='store_true', help='FP16 mode (faster)')
     parser.add_argument('--stride', type=int, help='Frame skip (2=2x faster)')
+    parser.add_argument('--imgsz', type=int, help='Inference image size (default 640)')
     parser.add_argument('--show', action='store_true', help='Live preview')
+    parser.add_argument('--parallel', type=int, default=1, help='Number of parallel workers')
     parser.add_argument('--chain', action='store_true', help='Process multiple videos as continuous sequence')
     parser.add_argument('--config', default='config.yaml', help='Config file')
     parser.add_argument('--json-progress', action='store_true', help='Output JSON progress (for GUI)')
@@ -559,12 +581,46 @@ Examples:
     # Process videos
     reports = []
     total_videos = len(video_files)
+    parallel = args.parallel
 
     if args.chain and len(video_files) > 1:
         # Chain mode: process all videos as continuous sequence
         report_path = process_video_chain(video_files, yolo, cfg, args)
         if report_path:
             reports.append(report_path)
+    elif parallel > 1 and total_videos > 1:
+        # Parallel mode: process videos concurrently
+        workers = min(parallel, total_videos)
+        if json_progress:
+            emit_json('status', message=f'Parallel processing: {workers} workers')
+
+        worker_args_list = [
+            {
+                'source': source,
+                'model_path': model_path,
+                'prompts': prompts,
+                'using_coreml': using_coreml,
+                'cfg': cfg,
+                'args': args,
+                'video_index': idx,
+                'total_videos': total_videos,
+            }
+            for idx, source in enumerate(video_files, 1)
+        ]
+
+        with ProcessPoolExecutor(max_workers=workers) as executor:
+            futures = {executor.submit(_parallel_worker, wa): wa['source'] for wa in worker_args_list}
+            for future in as_completed(futures):
+                try:
+                    report_path = future.result()
+                    if report_path:
+                        reports.append(report_path)
+                except Exception as e:
+                    source = futures[future]
+                    if json_progress:
+                        emit_json('status', message=f'Error processing {Path(source).name}: {e}')
+                    else:
+                        print(f'Error processing {Path(source).name}: {e}')
     else:
         # Normal mode: process each video independently
         for idx, source in enumerate(video_files, 1):
