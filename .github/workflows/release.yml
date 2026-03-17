@@ -18,10 +18,6 @@ jobs:
             args: --target aarch64-apple-darwin
             name: macOS-arm64
             target_triple: aarch64-apple-darwin
-          - platform: macos-13
-            args: --target x86_64-apple-darwin
-            name: macOS-x64
-            target_triple: x86_64-apple-darwin
           - platform: windows-latest
             args: ''
             name: Windows-x64
@@ -48,7 +44,14 @@ jobs:
           python-version: '3.13'
 
       - name: Install Python dependencies and PyInstaller
-        run: pip install -r requirements.txt pyinstaller
+        shell: bash
+        run: |
+          # Linux: CPU-only PyTorch (avoids 4GB+ binary limit with CUDA)
+          # Windows/macOS: full PyTorch (CUDA for NVIDIA, MPS for Apple Silicon)
+          if [ "$RUNNER_OS" == "Linux" ]; then
+            pip install torch torchvision --index-url https://download.pytorch.org/whl/cpu
+          fi
+          pip install -r requirements.txt pyinstaller
 
       - name: Build Python sidecar
         shell: bash
@@ -91,7 +94,7 @@ jobs:
       - name: Install Rust stable
         uses: dtolnay/rust-toolchain@stable
         with:
-          targets: ${{ contains(matrix.args, 'aarch64') && 'aarch64-apple-darwin' || contains(matrix.args, 'x86_64') && 'x86_64-apple-darwin' || '' }}
+          targets: ${{ matrix.platform == 'macos-latest' && 'aarch64-apple-darwin' || '' }}
 
       - name: Rust cache
         uses: swatinem/rust-cache@v2
@@ -118,8 +121,7 @@ jobs:
             Download the installer for your platform below.
 
             ### Installation
-            - **macOS (Apple Silicon)**: Download the `.dmg` file for arm64
-            - **macOS (Intel)**: Download the `.dmg` file for x64
+            - **macOS (Apple Silicon)**: Download the `.dmg` file
             - **Windows**: Download the `.exe` or `.msi` installer
             - **Linux**: Download the `.AppImage` or `.deb` file
 
