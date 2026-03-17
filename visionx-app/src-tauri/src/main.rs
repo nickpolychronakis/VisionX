@@ -1,11 +1,11 @@
 // Prevents additional console window on Windows in release
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
-use std::process::{Command, Stdio, Child};
-use std::io::{BufRead, BufReader};
-use std::thread;
+use std::process::Command;
 use std::sync::{Arc, Mutex};
-use tauri::{AppHandle, Emitter};
+use tauri::{AppHandle, Emitter, Manager};
+use tauri_plugin_shell::ShellExt;
+use tauri_plugin_shell::process::{CommandChild, CommandEvent};
 use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Serialize)]
@@ -17,6 +17,12 @@ struct ProgressEvent {
     video_index: u32,
     total_videos: u32,
     fps: f32,
+}
+
+#[derive(Clone, Serialize)]
+struct StatusEvent {
+    event_type: String,
+    message: String,
 }
 
 #[derive(Deserialize)]
@@ -32,7 +38,7 @@ struct ProcessConfig {
 
 // Global state to track the current process
 struct ProcessState {
-    child: Option<Child>,
+    child: Option<CommandChild>,
     cancelled: bool,
 }
 
@@ -60,9 +66,22 @@ async fn process_videos(
         process_state.cancelled = false;
     }
 
+    // Get resource and data directories
+    let resource_dir = app.path().resource_dir()
+        .map_err(|e| format!("Failed to get resource dir: {}", e))?;
+    let data_dir = app.path().app_data_dir()
+        .map_err(|e| format!("Failed to get data dir: {}", e))?;
+
+    // Ensure data dir exists
+    let _ = std::fs::create_dir_all(&data_dir);
+
     // Build command arguments
     let mut args = vec![
         "--json-progress".to_string(),
+        "--resource-dir".to_string(),
+        resource_dir.to_string_lossy().to_string(),
+        "--data-dir".to_string(),
+        data_dir.to_string_lossy().to_string(),
         "--conf".to_string(),
         config.confidence.to_string(),
         "--stride".to_string(),
@@ -95,12 +114,9 @@ async fn process_videos(
 
     args.extend(files.iter().cloned());
 
-    let python_exe = "/Users/nickpolychronakis/Developer/VisionX/venv/bin/python3";
-    let vision_script = "/Users/nickpolychronakis/Developer/VisionX/vision.py";
-
     let _ = app.emit("progress", ProgressEvent {
         event_type: "status".to_string(),
-        video: format!("Starting: {}", vision_script),
+        video: "Starting VisionX engine...".to_string(),
         frame: 0,
         total_frames: 0,
         video_index: 0,
@@ -108,105 +124,104 @@ async fn process_videos(
         fps: 0.0,
     });
 
-    let mut child = Command::new(python_exe)
-        .arg(vision_script)
+    // Spawn sidecar
+    let (mut rx, child) = app.shell()
+        .sidecar("vision")
+        .map_err(|e| format!("Failed to find vision sidecar: {}", e))?
         .args(&args)
-        .current_dir("/Users/nickpolychronakis/Developer/VisionX")
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
         .spawn()
-        .map_err(|e| format!("Failed to start Python: {}", e))?;
+        .map_err(|e| format!("Failed to start vision engine: {}", e))?;
 
     // Store child process in state
     {
         let mut process_state = state.lock().map_err(|e| e.to_string())?;
         // Kill any existing process first
-        if let Some(mut old_child) = process_state.child.take() {
+        if let Some(old_child) = process_state.child.take() {
             let _ = old_child.kill();
         }
+        process_state.child = Some(child);
     }
 
-    let stdout = child.stdout.take()
-        .ok_or("Failed to capture stdout")?;
+    let mut stderr_output = String::new();
 
-    let stderr = child.stderr.take()
-        .ok_or("Failed to capture stderr")?;
-
-    let stderr_thread = thread::spawn(move || {
-        let reader = BufReader::new(stderr);
-        let mut stderr_output = String::new();
-        for line in reader.lines() {
-            if let Ok(line) = line {
-                stderr_output.push_str(&line);
-                stderr_output.push('\n');
-            }
-        }
-        stderr_output
-    });
-
-    let state_clone = Arc::clone(&state);
-    let reader = BufReader::new(stdout);
-
-    for line in reader.lines() {
+    // Read events from sidecar
+    while let Some(event) = rx.recv().await {
         // Check if cancelled
         {
-            let process_state = state_clone.lock().map_err(|e| e.to_string())?;
+            let process_state = state.lock().map_err(|e| e.to_string())?;
             if process_state.cancelled {
-                // Kill the process
                 drop(process_state);
-                let mut ps = state_clone.lock().map_err(|e| e.to_string())?;
-                if let Some(mut c) = ps.child.take() {
-                    let _ = c.kill();
+                let mut ps = state.lock().map_err(|e| e.to_string())?;
+                if let Some(child) = ps.child.take() {
+                    let _ = child.kill();
                 }
                 return Err("Processing cancelled".to_string());
             }
         }
 
-        if let Ok(line) = line {
-            if let Ok(json) = serde_json::from_str::<serde_json::Value>(&line) {
-                match json.get("type").and_then(|v| v.as_str()) {
-                    Some("progress") => {
-                        let event = ProgressEvent {
-                            event_type: "progress".to_string(),
-                            video: json["video"].as_str().unwrap_or("").to_string(),
-                            frame: json["frame"].as_u64().unwrap_or(0) as u32,
-                            total_frames: json["total_frames"].as_u64().unwrap_or(0) as u32,
-                            video_index: json["video_index"].as_u64().unwrap_or(0) as u32,
-                            total_videos: json["total_videos"].as_u64().unwrap_or(0) as u32,
-                            fps: json["fps"].as_f64().unwrap_or(0.0) as f32,
-                        };
-                        let _ = app.emit("progress", event);
-                    },
-                    Some("report") => {
-                        if let Some(path) = json["path"].as_str() {
-                            reports.push(path.to_string());
-                        }
-                    },
-                    _ => {}
+        match event {
+            CommandEvent::Stdout(line) => {
+                let line_str = String::from_utf8_lossy(&line);
+                if let Ok(json) = serde_json::from_str::<serde_json::Value>(&line_str) {
+                    match json.get("type").and_then(|v| v.as_str()) {
+                        Some("progress") => {
+                            let event = ProgressEvent {
+                                event_type: "progress".to_string(),
+                                video: json["video"].as_str().unwrap_or("").to_string(),
+                                frame: json["frame"].as_u64().unwrap_or(0) as u32,
+                                total_frames: json["total_frames"].as_u64().unwrap_or(0) as u32,
+                                video_index: json["video_index"].as_u64().unwrap_or(0) as u32,
+                                total_videos: json["total_videos"].as_u64().unwrap_or(0) as u32,
+                                fps: json["fps"].as_f64().unwrap_or(0.0) as f32,
+                            };
+                            let _ = app.emit("progress", event);
+                        },
+                        Some("report") => {
+                            if let Some(path) = json["path"].as_str() {
+                                reports.push(path.to_string());
+                            }
+                        },
+                        Some("model_download") => {
+                            let message = json["message"].as_str().unwrap_or("Downloading model...").to_string();
+                            let _ = app.emit("status", StatusEvent {
+                                event_type: "model_download".to_string(),
+                                message,
+                            });
+                        },
+                        Some("error") => {
+                            let message = json["message"].as_str().unwrap_or("Unknown error").to_string();
+                            let _ = app.emit("status", StatusEvent {
+                                event_type: "error".to_string(),
+                                message,
+                            });
+                        },
+                        _ => {}
+                    }
                 }
             }
-        }
-    }
+            CommandEvent::Stderr(line) => {
+                stderr_output.push_str(&String::from_utf8_lossy(&line));
+                stderr_output.push('\n');
+            }
+            CommandEvent::Terminated(status) => {
+                // Clear the child from state
+                let mut process_state = state.lock().map_err(|e| e.to_string())?;
+                process_state.child = None;
 
-    let status = child.wait().map_err(|e| e.to_string())?;
-    let stderr_output = stderr_thread.join().unwrap_or_default();
-
-    // Clear the child from state
-    {
-        let mut process_state = state.lock().map_err(|e| e.to_string())?;
-        process_state.child = None;
-    }
-
-    if !status.success() {
-        // Check if it was cancelled
-        let process_state = state.lock().map_err(|e| e.to_string())?;
-        if process_state.cancelled {
-            return Err("Processing cancelled".to_string());
+                if status.code != Some(0) {
+                    // Check if it was cancelled
+                    if process_state.cancelled {
+                        return Err("Processing cancelled".to_string());
+                    }
+                    if !stderr_output.is_empty() {
+                        return Err(format!("Processing failed: {}", stderr_output));
+                    }
+                    return Err("Processing failed".to_string());
+                }
+                break;
+            }
+            _ => {}
         }
-        if !stderr_output.is_empty() {
-            return Err(format!("Processing failed: {}", stderr_output));
-        }
-        return Err("Processing failed".to_string());
     }
 
     Ok(reports)
@@ -218,7 +233,7 @@ fn cancel_processing(state: tauri::State<'_, Arc<Mutex<ProcessState>>>) -> Resul
     process_state.cancelled = true;
 
     // Try to kill the process if it exists
-    if let Some(mut child) = process_state.child.take() {
+    if let Some(child) = process_state.child.take() {
         let _ = child.kill();
     }
 

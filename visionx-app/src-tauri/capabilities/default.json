@@ -16,6 +16,10 @@
     "fs:allow-exists",
     "shell:default",
     "shell:allow-open",
+    {
+      "identifier": "shell:allow-execute",
+      "allow": [{ "name": "vision", "sidecar": true }]
+    },
     "updater:default",
     "updater:allow-check",
     "updater:allow-download-and-install",

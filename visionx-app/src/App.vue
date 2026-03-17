@@ -39,6 +39,7 @@ const progress = ref({
 // Processing state
 const isProcessing = ref(false);
 const processingError = ref<string | null>(null);
+const statusMessage = ref("");
 
 // Reports
 const reports = ref<string[]>([]);
@@ -46,6 +47,7 @@ const selectedReport = ref<string | null>(null);
 
 // Event listener cleanup
 let unlistenProgress: UnlistenFn | null = null;
+let unlistenStatus: UnlistenFn | null = null;
 
 // Computed
 const canProcess = computed(() => selectedFiles.value.length > 0);
@@ -62,6 +64,10 @@ onMounted(async () => {
     total_videos: number;
     fps: number;
   }>("progress", (event) => {
+    // Clear status message when we start getting real progress
+    if (event.payload.frame > 0) {
+      statusMessage.value = "";
+    }
     progress.value = {
       currentVideo: event.payload.video,
       currentFrame: event.payload.frame,
@@ -71,12 +77,23 @@ onMounted(async () => {
       fps: event.payload.fps,
     };
   });
+
+  // Listen for status events (model download, errors)
+  unlistenStatus = await listen<{
+    event_type: string;
+    message: string;
+  }>("status", (event) => {
+    if (event.payload.event_type === "model_download") {
+      statusMessage.value = event.payload.message;
+    } else if (event.payload.event_type === "error") {
+      processingError.value = event.payload.message;
+    }
+  });
 });
 
 onUnmounted(() => {
-  if (unlistenProgress) {
-    unlistenProgress();
-  }
+  if (unlistenProgress) unlistenProgress();
+  if (unlistenStatus) unlistenStatus();
 });
 
 // Methods
@@ -94,6 +111,7 @@ async function startProcessing() {
   currentView.value = "processing";
   isProcessing.value = true;
   processingError.value = null;
+  statusMessage.value = "";
 
   progress.value = {
     currentVideo: selectedFiles.value[0],
@@ -222,6 +240,7 @@ function startNew() {
           :video-index="progress.videoIndex"
           :total-videos="progress.totalVideos"
           :fps="progress.fps"
+          :status-message="statusMessage"
         />
         <div class="actions">
           <button class="secondary" @click="cancelProcessing">Ακύρωση</button>

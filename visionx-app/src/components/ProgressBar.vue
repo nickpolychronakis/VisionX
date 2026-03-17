@@ -8,6 +8,7 @@ const props = defineProps<{
   videoIndex: number;
   totalVideos: number;
   fps: number;
+  statusMessage: string;
 }>();
 
 const framePercent = computed(() => {
@@ -35,8 +36,14 @@ const videoName = computed(() => {
       <span class="video-name">{{ videoName }}</span>
     </div>
 
+    <!-- Status message (downloading model, etc.) -->
+    <div v-if="statusMessage" class="loading-section">
+      <div class="spinner"></div>
+      <p>{{ statusMessage }}</p>
+    </div>
+
     <!-- Loading indicator when totalFrames is 0 -->
-    <div v-if="totalFrames === 0" class="loading-section">
+    <div v-else-if="totalFrames === 0" class="loading-section">
       <div class="spinner"></div>
       <p>Αρχικοποίηση... Η φόρτωση του μοντέλου μπορεί να πάρει λίγο χρόνο.</p>
       <p class="hint">Η ανάλυση θα ξεκινήσει μόλις φορτωθεί το μοντέλο.</p>

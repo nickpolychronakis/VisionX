@@ -4,6 +4,7 @@
 import argparse
 import base64
 import json
+import os
 import sys
 import yaml
 import cv2
@@ -57,17 +58,25 @@ def get_coreml_model_path(pt_model: str) -> Path | None:
     return mlpackage if mlpackage.exists() else None
 
 
-def export_to_coreml(pt_model: str, prompts: list[str], json_progress: bool = False) -> Path | None:
+def export_to_coreml(pt_model: str, prompts: list[str], json_progress: bool = False, data_dir: str | None = None) -> Path | None:
     """Export PyTorch model to CoreML (macOS only, one-time operation).
 
     Classes must be set before export as CoreML models have fixed classes.
+    Exports to data_dir/models/ if provided (resource dir may be read-only).
     """
     if sys.platform != 'darwin':
         return None
 
+    # Check if already exported next to the .pt file
     mlpackage = Path(pt_model).with_suffix('.mlpackage')
     if mlpackage.exists():
         return mlpackage
+
+    # Also check data dir
+    if data_dir:
+        data_mlpackage = Path(data_dir) / 'models' / mlpackage.name
+        if data_mlpackage.exists():
+            return data_mlpackage
 
     if json_progress:
         emit_json('status', message='Exporting to CoreML (one-time)...')
@@ -77,7 +86,14 @@ def export_to_coreml(pt_model: str, prompts: list[str], json_progress: bool = Fa
     try:
         model = YOLO(pt_model)
         model.set_classes(prompts)  # type: ignore[misc]  # Bake classes into CoreML model
-        model.export(format="coreml")
+        # Export to data dir if available (resource dir may be read-only in bundled app)
+        export_dir = str(Path(data_dir) / 'models') if data_dir else None
+        model.export(format="coreml", project=export_dir)
+        # Check both possible locations
+        if data_dir:
+            data_mlpackage = Path(data_dir) / 'models' / mlpackage.name
+            if data_mlpackage.exists():
+                return data_mlpackage
         return mlpackage if mlpackage.exists() else None
     except Exception as e:
         if json_progress:
@@ -148,6 +164,9 @@ def process_video(source: str, yolo: YOLO, cfg: dict, args, video_index: int = 1
     # Output directory for YOLO (only if saving video/crops)
     output_dir = args.output or str(source_path.parent)
 
+    # Resolve tracker path
+    tracker_path = getattr(args, '_tracker_path', 'tracker.yaml')
+
     # Run tracking
     results = yolo.track(
         source=source,
@@ -164,7 +183,7 @@ def process_video(source: str, yolo: YOLO, cfg: dict, args, video_index: int = 1
         show=show,
         stream=True,
         verbose=False,
-        tracker='tracker.yaml',
+        tracker=tracker_path,
     )
 
     # Track detections for report (with embedded thumbnails)
@@ -292,6 +311,7 @@ def process_video_chain(sources: list[str], yolo: YOLO, cfg: dict, args) -> str 
     stride = args.stride or cfg['vid_stride']
     half = args.half or cfg['half']
     save_report = cfg['save_report']
+    tracker_path = getattr(args, '_tracker_path', 'tracker.yaml')
 
     # Device - CoreML handles device selection automatically
     model_path = str(getattr(yolo, 'ckpt_path', ''))
@@ -349,7 +369,7 @@ def process_video_chain(sources: list[str], yolo: YOLO, cfg: dict, args) -> str 
             vid_stride=stride,
             stream=True,
             verbose=False,
-            tracker='tracker.yaml',
+            tracker=tracker_path,
         )
 
         frame_in_video = 0
@@ -490,12 +510,40 @@ Examples:
     parser.add_argument('--show', action='store_true', help='Live preview')
     parser.add_argument('--parallel', type=int, default=1, help='Number of parallel workers')
     parser.add_argument('--chain', action='store_true', help='Process multiple videos as continuous sequence')
-    parser.add_argument('--config', default='config.yaml', help='Config file')
+    parser.add_argument('--config', default=None, help='Config file')
+    parser.add_argument('--resource-dir', default=None, help='Bundled resources directory (set by Tauri)')
+    parser.add_argument('--data-dir', default=None, help='Writable app data directory (set by Tauri)')
     parser.add_argument('--json-progress', action='store_true', help='Output JSON progress (for GUI)')
     args = parser.parse_args()
 
+    # Resolve resource directories
+    resource_dir = args.resource_dir
+    data_dir = args.data_dir
+
+    # Ensure data dir exists (writable location for downloads, CoreML exports)
+    if data_dir:
+        os.makedirs(os.path.join(data_dir, 'models'), exist_ok=True)
+
+    # Resolve config path: explicit > resource dir > CWD fallback
+    config_path = args.config
+    if not config_path:
+        if resource_dir:
+            config_path = os.path.join(resource_dir, 'config.yaml')
+        else:
+            config_path = 'config.yaml'
+
+    # Resolve tracker path
+    tracker_path = 'tracker.yaml'
+    if resource_dir:
+        candidate = os.path.join(resource_dir, 'tracker.yaml')
+        if os.path.exists(candidate):
+            tracker_path = candidate
+
+    # Store resolved paths in args for use by processing functions
+    args._tracker_path = tracker_path
+
     # Load config
-    cfg = load_config(args.config)
+    cfg = load_config(config_path)
 
     # Collect video files
     video_files = []
@@ -538,12 +586,41 @@ Examples:
     prompts = args.search or cfg['prompts']
     json_progress = getattr(args, 'json_progress', False)
 
+    # Resolve model path: check data dir (downloaded), then resource dir (bundled), then CWD
+    if not Path(model_path).is_absolute():
+        for base in [data_dir, resource_dir]:
+            if base:
+                candidate = os.path.join(base, 'models', model_path)
+                if os.path.exists(candidate):
+                    model_path = candidate
+                    break
+
+    # If model still not found, it will be auto-downloaded by ultralytics
+    if not Path(model_path).exists():
+        if json_progress:
+            emit_json('model_download', model=Path(model_path).name, status='starting',
+                      message=f'Downloading {Path(model_path).name}...')
+        else:
+            print(f'Model not found locally. Downloading {Path(model_path).name}...')
+        # Set model path to data dir so ultralytics downloads there
+        if data_dir:
+            download_dest = os.path.join(data_dir, 'models')
+            os.makedirs(download_dest, exist_ok=True)
+            model_path = os.path.join(download_dest, Path(model_path).name)
+
     # macOS: Try CoreML for Neural Engine acceleration
     using_coreml = False
     if sys.platform == 'darwin':
+        # Check for CoreML model next to the .pt file, and also in data dir
         coreml_path = get_coreml_model_path(model_path)
+        if coreml_path is None and data_dir:
+            # Check data dir for existing CoreML export
+            data_coreml = Path(data_dir) / 'models' / Path(model_path).with_suffix('.mlpackage').name
+            if data_coreml.exists():
+                coreml_path = data_coreml
         if coreml_path is None:
-            coreml_path = export_to_coreml(model_path, prompts, json_progress)
+            # Export to data dir (resource dir may be read-only)
+            coreml_path = export_to_coreml(model_path, prompts, json_progress, data_dir)
 
         if coreml_path and coreml_path.exists():
             model_path = str(coreml_path)
