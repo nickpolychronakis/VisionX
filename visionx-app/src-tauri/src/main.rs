@@ -361,6 +361,7 @@ async fn check_for_updates(app: AppHandle) -> Result<UpdateInfo, String> {
     }
 }
 
+#[cfg(target_os = "macos")]
 fn version_compare(latest: &str, current: &str) -> bool {
     let parse_version = |v: &str| -> Vec<u32> {
         v.split('.')

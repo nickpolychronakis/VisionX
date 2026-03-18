@@ -10,61 +10,26 @@ jobs:
   release:
     permissions:
       contents: write
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - platform: macos-latest
-            args: --target aarch64-apple-darwin
-            name: macOS-arm64
-            target_triple: aarch64-apple-darwin
-          - platform: windows-latest
-            args: ''
-            name: Windows-x64
-            target_triple: x86_64-pc-windows-msvc
-          - platform: ubuntu-22.04
-            args: ''
-            name: Linux-x64
-            target_triple: x86_64-unknown-linux-gnu
-
-    runs-on: ${{ matrix.platform }}
+    runs-on: windows-latest
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
-
-      - name: Install Linux dependencies
-        if: matrix.platform == 'ubuntu-22.04'
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf
 
       - name: Setup Python
         uses: actions/setup-python@v5
         with:
           python-version: '3.13'
 
-      - name: Install Python dependencies and PyInstaller
+      - name: Install Python dependencies (CUDA 12.4)
         shell: bash
         run: |
-          if [ "$RUNNER_OS" == "Linux" ]; then
-            # Linux: CPU-only PyTorch (avoids 4GB+ binary limit with CUDA)
-            pip install torch torchvision --index-url https://download.pytorch.org/whl/cpu
-          elif [ "$RUNNER_OS" == "Windows" ]; then
-            # Windows: CUDA 12.4 PyTorch for NVIDIA GPU support
-            pip install torch torchvision --index-url https://download.pytorch.org/whl/cu124
-          fi
+          pip install torch torchvision --index-url https://download.pytorch.org/whl/cu124
           pip install -r requirements.txt pyinstaller
 
-      - name: Build Python sidecar
+      - name: Build Python sidecar (onedir for CUDA libs)
         shell: bash
         run: |
-          SEP=":"
-          MODE="--onefile"
-          if [ "$RUNNER_OS" == "Windows" ]; then
-            SEP=";"
-            MODE="--onedir"  # CUDA libs too large for --onefile
-          fi
-          pyinstaller $MODE --name vision vision.py \
+          pyinstaller --onedir --name vision vision.py \
             --hidden-import report \
             --hidden-import tqdm \
             --hidden-import yaml \
@@ -74,22 +39,15 @@ jobs:
             --hidden-import ultralytics \
             --collect-all ultralytics \
             --collect-all clip \
-            --add-data "report.py${SEP}."
+            --add-data "report.py;."
 
-      - name: Place sidecar binary
+      - name: Place sidecar and CUDA libs
         shell: bash
         run: |
           mkdir -p visionx-app/src-tauri/binaries
-          if [ "$RUNNER_OS" == "Windows" ]; then
-            # --onedir: copy exe as sidecar, _internal as resources
-            cp "dist/vision/vision.exe" \
-               "visionx-app/src-tauri/binaries/vision-${{ matrix.target_triple }}.exe"
-            cp -r "dist/vision/_internal" "visionx-app/src-tauri/resources/_internal"
-          else
-            # --onefile: single binary
-            cp "dist/vision" \
-               "visionx-app/src-tauri/binaries/vision-${{ matrix.target_triple }}"
-          fi
+          cp "dist/vision/vision.exe" \
+             "visionx-app/src-tauri/binaries/vision-x86_64-pc-windows-msvc.exe"
+          cp -r "dist/vision/_internal" "visionx-app/src-tauri/resources/_internal"
 
       - name: Place resources and download default model
         shell: bash
@@ -114,14 +72,12 @@ jobs:
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: 20
+          node-version: 22
           cache: 'pnpm'
           cache-dependency-path: visionx-app/pnpm-lock.yaml
 
       - name: Install Rust stable
         uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: ${{ matrix.platform == 'macos-latest' && 'aarch64-apple-darwin' || '' }}
 
       - name: Rust cache
         uses: swatinem/rust-cache@v2
@@ -137,7 +93,6 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
-          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         with:
           projectPath: visionx-app
           tagName: ${{ github.ref_name }}
@@ -145,16 +100,15 @@ jobs:
           releaseBody: |
             ## VisionX ${{ github.ref_name }}
 
-            Download the installer for your platform below.
-
             ### Installation
-            - **macOS (Apple Silicon)**: Download the `.dmg` file
-            - **Windows**: Download the `.exe` or `.msi` installer
-            - **Linux**: Download the `.AppImage` or `.deb` file
+            - Download the `.exe` installer for Windows
 
             ### Auto-Update
-            - Windows & Linux: The app will notify you when updates are available
-            - macOS: Use "Check for updates" button in the app
+            - The app will notify you when updates are available
+
+            ### NVIDIA GPU Support
+            - CUDA 12.4 included — NVIDIA GPUs are used automatically
+            - Falls back to CPU if no NVIDIA GPU is detected
 
             ### Bundled Model
             - Default: yoloe-26x-seg.pt (XLarge, highest accuracy)
@@ -162,4 +116,5 @@ jobs:
           releaseDraft: false
           prerelease: false
           includeUpdaterJson: true
-          args: ${{ matrix.args }}
+          tauriScript: pnpm tauri
+          args: --bundles nsis
