@@ -127,12 +127,15 @@ def process_video(source: str, yolo: YOLO, cfg: dict, args, video_index: int = 1
     model_path = str(getattr(yolo, 'ckpt_path', ''))
     if model_path.endswith('.mlpackage'):
         device = None  # CoreML uses Neural Engine + GPU + CPU automatically
+        half = False  # CoreML handles precision internally
     elif torch.cuda.is_available():
         device = 'cuda'
     elif torch.backends.mps.is_available():
         device = 'mps'
+        half = False  # MPS doesn't reliably support FP16 for all ops
     else:
         device = 'cpu'
+        half = False  # CPU doesn't support FP16
 
     # Get video info
     cap = cv2.VideoCapture(source)
@@ -317,12 +320,15 @@ def process_video_chain(sources: list[str], yolo: YOLO, cfg: dict, args) -> str 
     model_path = str(getattr(yolo, 'ckpt_path', ''))
     if model_path.endswith('.mlpackage'):
         device = None  # CoreML uses Neural Engine + GPU + CPU automatically
+        half = False  # CoreML handles precision internally
     elif torch.cuda.is_available():
         device = 'cuda'
     elif torch.backends.mps.is_available():
         device = 'mps'
+        half = False  # MPS doesn't reliably support FP16 for all ops
     else:
         device = 'cpu'
+        half = False  # CPU doesn't support FP16
 
     # Calculate total frames across all videos
     video_info = []
