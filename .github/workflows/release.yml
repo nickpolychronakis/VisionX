@@ -15,54 +15,14 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Setup Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: '3.13'
-
-      - name: Install Python dependencies (CUDA 12.4)
+      - name: Place resource files
         shell: bash
         run: |
-          pip install torch torchvision --index-url https://download.pytorch.org/whl/cu124
-          pip install -r requirements.txt pyinstaller
-
-      - name: Build Python sidecar (onedir for CUDA libs)
-        shell: bash
-        run: |
-          pyinstaller --onedir --name vision vision.py \
-            --hidden-import report \
-            --hidden-import tqdm \
-            --hidden-import yaml \
-            --hidden-import clip \
-            --hidden-import ftfy \
-            --hidden-import regex \
-            --hidden-import ultralytics \
-            --collect-all ultralytics \
-            --collect-all clip \
-            --add-data "report.py;."
-
-      - name: Place sidecar and CUDA libs
-        shell: bash
-        run: |
-          mkdir -p visionx-app/src-tauri/binaries
-          cp "dist/vision/vision.exe" \
-             "visionx-app/src-tauri/binaries/vision-x86_64-pc-windows-msvc.exe"
-          cp -r "dist/vision/_internal" "visionx-app/src-tauri/resources/_internal"
-
-      - name: Place resources and download default model
-        shell: bash
-        run: |
-          mkdir -p visionx-app/src-tauri/resources/models
-          cp config.yaml tracker.yaml visionx-app/src-tauri/resources/
-          curl -L --fail -o visionx-app/src-tauri/resources/models/yoloe-26x-seg.pt \
-            "https://github.com/ultralytics/assets/releases/download/v8.4.0/yoloe-26x-seg.pt"
-          # Verify download integrity (must be >100MB)
-          FILE_SIZE=$(wc -c < visionx-app/src-tauri/resources/models/yoloe-26x-seg.pt | tr -d ' ')
-          echo "Model file size: ${FILE_SIZE} bytes"
-          if [ "$FILE_SIZE" -lt 100000000 ]; then
-            echo "ERROR: Model file too small (${FILE_SIZE} bytes). Download likely failed."
-            exit 1
-          fi
+          mkdir -p visionx-app/src-tauri/resources/scripts
+          cp vision.py visionx-app/src-tauri/resources/scripts/
+          cp report.py visionx-app/src-tauri/resources/scripts/
+          cp config.yaml visionx-app/src-tauri/resources/
+          cp tracker.yaml visionx-app/src-tauri/resources/
 
       - name: Install pnpm
         uses: pnpm/action-setup@v4
@@ -101,18 +61,19 @@ jobs:
             ## VisionX ${{ github.ref_name }}
 
             ### Installation
-            - Download the `.exe` installer for Windows
+            - Download the `.exe` installer for Windows (~15 MB)
+            - On first launch, the app will download required AI components (~1-2.5 GB)
 
-            ### Auto-Update
-            - The app will notify you when updates are available
+            ### Features
+            - NVIDIA GPU auto-detection with CUDA acceleration
+            - CPU fallback for systems without NVIDIA GPU
+            - Auto-update support
 
-            ### NVIDIA GPU Support
-            - CUDA 12.4 included — NVIDIA GPUs are used automatically
-            - Falls back to CPU if no NVIDIA GPU is detected
-
-            ### Bundled Model
-            - Default: yoloe-26x-seg.pt (XLarge, highest accuracy)
-            - Other models can be selected in settings and will be downloaded automatically
+            ### First Launch
+            The app will automatically download:
+            - Python runtime
+            - PyTorch (with CUDA if NVIDIA GPU detected)
+            - AI libraries and model
           releaseDraft: false
           prerelease: false
           includeUpdaterJson: true

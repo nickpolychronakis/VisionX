@@ -1,6 +1,10 @@
 // Prevents additional console window on Windows in release
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod logging;
+mod setup;
+
+use logging::Logger;
 use std::process::Command;
 use std::sync::{Arc, Mutex};
 use tauri::{AppHandle, Emitter, Manager};
@@ -51,6 +55,59 @@ impl Default for ProcessState {
     }
 }
 
+// ============================================================
+// Setup commands
+// ============================================================
+
+#[tauri::command]
+async fn check_setup(app: AppHandle) -> Result<setup::SetupStatus, String> {
+    let data_dir = app.path().app_data_dir()
+        .map_err(|e| format!("Failed to get data dir: {}", e))?;
+    let _ = std::fs::create_dir_all(&data_dir);
+
+    let logger = Logger::new(&data_dir);
+    logger.info(&format!("App started, version {}", app.package_info().version));
+    logger.info("Checking setup status...");
+
+    let status = setup::check_setup(&data_dir);
+    logger.info(&format!("Setup needed: {}", status.needs_setup));
+
+    Ok(status)
+}
+
+#[tauri::command]
+async fn detect_gpu(app: AppHandle) -> Result<setup::GpuInfo, String> {
+    let data_dir = app.path().app_data_dir()
+        .map_err(|e| format!("Failed to get data dir: {}", e))?;
+    let logger = Logger::new(&data_dir);
+
+    Ok(setup::detect_gpu(&logger))
+}
+
+#[tauri::command]
+async fn run_setup(app: AppHandle, use_cuda: bool) -> Result<(), String> {
+    let data_dir = app.path().app_data_dir()
+        .map_err(|e| format!("Failed to get data dir: {}", e))?;
+    let _ = std::fs::create_dir_all(&data_dir);
+
+    let logger = Logger::new(&data_dir);
+    logger.info(&format!("Starting setup (CUDA: {})", use_cuda));
+
+    setup::run_setup(&app, &data_dir, use_cuda, &logger).await
+}
+
+#[tauri::command]
+fn get_log_path(app: AppHandle) -> Result<String, String> {
+    let data_dir = app.path().app_data_dir()
+        .map_err(|e| format!("Failed to get data dir: {}", e))?;
+    let path = logging::get_log_path(&data_dir);
+    Ok(path.to_string_lossy().to_string())
+}
+
+// ============================================================
+// Processing commands
+// ============================================================
+
 #[tauri::command]
 async fn process_videos(
     app: AppHandle,
@@ -66,17 +123,31 @@ async fn process_videos(
         process_state.cancelled = false;
     }
 
-    // Get resource and data directories
-    let resource_dir = app.path().resource_dir()
-        .map_err(|e| format!("Failed to get resource dir: {}", e))?;
+    // Get directories
     let data_dir = app.path().app_data_dir()
         .map_err(|e| format!("Failed to get data dir: {}", e))?;
+    let resource_dir = app.path().resource_dir()
+        .map_err(|e| format!("Failed to get resource dir: {}", e))?;
 
-    // Ensure data dir exists
-    let _ = std::fs::create_dir_all(&data_dir);
+    let logger = Logger::new(&data_dir);
+    logger.info(&format!("Processing {} video(s)", files.len()));
+
+    // Paths
+    let python_exe = setup::python_exe_path(&data_dir);
+    let packages_dir = setup::packages_dir_path(&data_dir);
+    let scripts_dir = setup::scripts_dir_path(&data_dir);
+    let vision_script = scripts_dir.join("vision.py");
+
+    if !python_exe.exists() {
+        return Err("Python not installed. Please run setup first.".to_string());
+    }
+    if !vision_script.exists() {
+        return Err("Vision script not found. Please run setup first.".to_string());
+    }
 
     // Build command arguments
     let mut args = vec![
+        vision_script.to_string_lossy().to_string(),
         "--json-progress".to_string(),
         "--resource-dir".to_string(),
         resource_dir.to_string_lossy().to_string(),
@@ -124,18 +195,31 @@ async fn process_videos(
         fps: 0.0,
     });
 
-    // Spawn sidecar
-    let (mut rx, child) = app.shell()
-        .sidecar("vision")
-        .map_err(|e| format!("Failed to find vision sidecar: {}", e))?
+    // Spawn Python process (not sidecar)
+    logger.info(&format!("Spawning: {} {}", python_exe.display(), args.join(" ")));
+
+    let python_str = python_exe.to_string_lossy().to_string();
+    let packages_str = packages_dir.to_string_lossy().to_string();
+    let use_system_python = setup::is_system_python(&data_dir);
+
+    let mut cmd = app.shell()
+        .command(&python_str);
+    cmd = cmd.env("PYTHONUNBUFFERED", "1");
+    if !use_system_python {
+        cmd = cmd.env("PYTHONPATH", &packages_str);
+    }
+    let (mut rx, child) = cmd
         .args(&args)
         .spawn()
-        .map_err(|e| format!("Failed to start vision engine: {}", e))?;
+        .map_err(|e| {
+            let msg = format!("Failed to start Python: {}", e);
+            logger.error(&msg);
+            msg
+        })?;
 
     // Store child process in state
     {
         let mut process_state = state.lock().map_err(|e| e.to_string())?;
-        // Kill any existing process first
         if let Some(old_child) = process_state.child.take() {
             let _ = old_child.kill();
         }
@@ -144,7 +228,7 @@ async fn process_videos(
 
     let mut stderr_output = String::new();
 
-    // Read events from sidecar
+    // Read events from Python process
     while let Some(event) = rx.recv().await {
         // Check if cancelled
         {
@@ -190,6 +274,7 @@ async fn process_videos(
                         },
                         Some("error") => {
                             let message = json["message"].as_str().unwrap_or("Unknown error").to_string();
+                            logger.error(&format!("Vision error: {}", message));
                             let _ = app.emit("status", StatusEvent {
                                 event_type: "error".to_string(),
                                 message,
@@ -200,23 +285,25 @@ async fn process_videos(
                 }
             }
             CommandEvent::Stderr(line) => {
-                stderr_output.push_str(&String::from_utf8_lossy(&line));
+                let line_str = String::from_utf8_lossy(&line);
+                stderr_output.push_str(&line_str);
                 stderr_output.push('\n');
             }
             CommandEvent::Terminated(status) => {
-                // Clear the child from state
                 let mut process_state = state.lock().map_err(|e| e.to_string())?;
                 process_state.child = None;
 
                 if status.code != Some(0) {
-                    // Check if it was cancelled
                     if process_state.cancelled {
                         return Err("Processing cancelled".to_string());
                     }
-                    if !stderr_output.is_empty() {
-                        return Err(format!("Processing failed: {}", stderr_output));
-                    }
-                    return Err("Processing failed".to_string());
+                    let err_msg = if !stderr_output.is_empty() {
+                        format!("Processing failed: {}", stderr_output)
+                    } else {
+                        "Processing failed".to_string()
+                    };
+                    logger.error(&err_msg);
+                    return Err(err_msg);
                 }
                 break;
             }
@@ -224,6 +311,7 @@ async fn process_videos(
         }
     }
 
+    logger.info(&format!("Processing complete, {} report(s)", reports.len()));
     Ok(reports)
 }
 
@@ -232,13 +320,16 @@ fn cancel_processing(state: tauri::State<'_, Arc<Mutex<ProcessState>>>) -> Resul
     let mut process_state = state.lock().map_err(|e| e.to_string())?;
     process_state.cancelled = true;
 
-    // Try to kill the process if it exists
     if let Some(child) = process_state.child.take() {
         let _ = child.kill();
     }
 
     Ok(())
 }
+
+// ============================================================
+// Utility commands
+// ============================================================
 
 #[tauri::command]
 fn get_report_content(path: String) -> Result<String, String> {
@@ -272,6 +363,41 @@ fn open_file(path: String) -> Result<(), String> {
     Ok(())
 }
 
+#[tauri::command]
+fn show_in_folder(path: String) -> Result<(), String> {
+    let folder = std::path::Path::new(&path)
+        .parent()
+        .map(|p| p.to_string_lossy().to_string())
+        .unwrap_or(path.clone());
+
+    #[cfg(target_os = "macos")]
+    {
+        Command::new("open")
+            .arg(&folder)
+            .spawn()
+            .map_err(|e| format!("Failed to open folder: {}", e))?;
+    }
+    #[cfg(target_os = "windows")]
+    {
+        Command::new("explorer")
+            .arg(&folder)
+            .spawn()
+            .map_err(|e| format!("Failed to open folder: {}", e))?;
+    }
+    #[cfg(target_os = "linux")]
+    {
+        Command::new("xdg-open")
+            .arg(&folder)
+            .spawn()
+            .map_err(|e| format!("Failed to open folder: {}", e))?;
+    }
+    Ok(())
+}
+
+// ============================================================
+// Update commands
+// ============================================================
+
 #[derive(Clone, Serialize)]
 struct UpdateInfo {
     available: bool,
@@ -285,10 +411,8 @@ struct UpdateInfo {
 async fn check_for_updates(app: AppHandle) -> Result<UpdateInfo, String> {
     let current_version = app.package_info().version.to_string();
 
-    // On macOS, we can't auto-update without code signing, so just check GitHub API
     #[cfg(target_os = "macos")]
     {
-        // Fetch latest release from GitHub API
         let client = reqwest::Client::new();
         let response = client
             .get("https://api.github.com/repos/nickpolychronakis/VisionX/releases/latest")
@@ -308,7 +432,6 @@ async fn check_for_updates(app: AppHandle) -> Result<UpdateInfo, String> {
             .trim_start_matches('v')
             .to_string();
 
-        // Find the .dmg asset for download
         let download_url = release["assets"]
             .as_array()
             .and_then(|assets| {
@@ -331,7 +454,6 @@ async fn check_for_updates(app: AppHandle) -> Result<UpdateInfo, String> {
         });
     }
 
-    // On Windows/Linux, use the built-in updater
     #[cfg(not(target_os = "macos"))]
     {
         use tauri_plugin_updater::UpdaterExt;
@@ -401,36 +523,9 @@ async fn install_update(_app: AppHandle) -> Result<(), String> {
     }
 }
 
-#[tauri::command]
-fn show_in_folder(path: String) -> Result<(), String> {
-    let folder = std::path::Path::new(&path)
-        .parent()
-        .map(|p| p.to_string_lossy().to_string())
-        .unwrap_or(path.clone());
-
-    #[cfg(target_os = "macos")]
-    {
-        Command::new("open")
-            .arg(&folder)
-            .spawn()
-            .map_err(|e| format!("Failed to open folder: {}", e))?;
-    }
-    #[cfg(target_os = "windows")]
-    {
-        Command::new("explorer")
-            .arg(&folder)
-            .spawn()
-            .map_err(|e| format!("Failed to open folder: {}", e))?;
-    }
-    #[cfg(target_os = "linux")]
-    {
-        Command::new("xdg-open")
-            .arg(&folder)
-            .spawn()
-            .map_err(|e| format!("Failed to open folder: {}", e))?;
-    }
-    Ok(())
-}
+// ============================================================
+// App entry point
+// ============================================================
 
 fn main() {
     tauri::Builder::default()
@@ -440,7 +535,23 @@ fn main() {
         .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_http::init())
         .manage(Arc::new(Mutex::new(ProcessState::default())))
-        .invoke_handler(tauri::generate_handler![process_videos, cancel_processing, get_report_content, open_file, show_in_folder, check_for_updates, install_update])
+        .invoke_handler(tauri::generate_handler![
+            // Setup
+            check_setup,
+            detect_gpu,
+            run_setup,
+            get_log_path,
+            // Processing
+            process_videos,
+            cancel_processing,
+            // Utilities
+            get_report_content,
+            open_file,
+            show_in_folder,
+            // Updates
+            check_for_updates,
+            install_update,
+        ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }

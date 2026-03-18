@@ -7,10 +7,11 @@ import FileSelector from "./components/FileSelector.vue";
 import SettingsPanel from "./components/SettingsPanel.vue";
 import ProgressBar from "./components/ProgressBar.vue";
 import ReportViewer from "./components/ReportViewer.vue";
+import SetupWizard from "./components/SetupWizard.vue";
 
 // App state
-type AppView = "landing" | "select" | "processing" | "results";
-const currentView = ref<AppView>("landing");
+type AppView = "loading" | "setup" | "landing" | "select" | "processing" | "results";
+const currentView = ref<AppView>("loading");
 
 // Selected files
 const selectedFiles = ref<string[]>([]);
@@ -54,6 +55,19 @@ const canProcess = computed(() => selectedFiles.value.length > 0);
 
 // Setup event listeners
 onMounted(async () => {
+  // Check if setup is needed
+  try {
+    const status = await invoke<{ needs_setup: boolean }>("check_setup");
+    if (status.needs_setup) {
+      currentView.value = "setup";
+    } else {
+      currentView.value = "select";
+    }
+  } catch (e) {
+    console.error("Failed to check setup:", e);
+    currentView.value = "setup";
+  }
+
   // Listen for progress events from backend
   unlistenProgress = await listen<{
     event_type: string;
@@ -192,6 +206,17 @@ function startNew() {
     </header>
 
     <main class="main">
+      <!-- Loading -->
+      <div v-if="currentView === 'loading'" class="view-loading">
+        <div class="spinner"></div>
+      </div>
+
+      <!-- Setup Wizard -->
+      <SetupWizard
+        v-else-if="currentView === 'setup'"
+        @complete="currentView = 'select'"
+      />
+
       <!-- Error Message -->
       <div v-if="processingError" class="error-message card">
         <strong>Σφάλμα:</strong> {{ processingError }}
@@ -414,5 +439,25 @@ function startNew() {
   color: white;
   font-size: 1.2rem;
   padding: 2px 8px;
+}
+
+.view-loading {
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  flex: 1;
+}
+
+.spinner {
+  width: 40px;
+  height: 40px;
+  border: 3px solid var(--border);
+  border-top-color: var(--accent);
+  border-radius: 50%;
+  animation: spin 1s linear infinite;
+}
+
+@keyframes spin {
+  to { transform: rotate(360deg); }
 }
 </style>
