@@ -182,7 +182,7 @@ function startNew() {
         <span class="subtitle">Ανίχνευση & Παρακολούθηση Αντικειμένων σε Βίντεο</span>
       </div>
       <button
-        v-if="currentView !== 'landing'"
+        v-if="currentView !== 'landing' && !isProcessing"
         class="info-btn"
         @click="currentView = 'landing'"
         title="Πληροφορίες"
