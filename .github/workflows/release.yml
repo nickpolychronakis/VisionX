@@ -46,10 +46,12 @@ jobs:
       - name: Install Python dependencies and PyInstaller
         shell: bash
         run: |
-          # Linux: CPU-only PyTorch (avoids 4GB+ binary limit with CUDA)
-          # Windows/macOS: full PyTorch (CUDA for NVIDIA, MPS for Apple Silicon)
           if [ "$RUNNER_OS" == "Linux" ]; then
+            # Linux: CPU-only PyTorch (avoids 4GB+ binary limit with CUDA)
             pip install torch torchvision --index-url https://download.pytorch.org/whl/cpu
+          elif [ "$RUNNER_OS" == "Windows" ]; then
+            # Windows: CUDA 12.4 PyTorch for NVIDIA GPU support
+            pip install torch torchvision --index-url https://download.pytorch.org/whl/cu124
           fi
           pip install -r requirements.txt pyinstaller
 
@@ -57,8 +59,12 @@ jobs:
         shell: bash
         run: |
           SEP=":"
-          if [ "$RUNNER_OS" == "Windows" ]; then SEP=";"; fi
-          pyinstaller --onefile --name vision vision.py \
+          MODE="--onefile"
+          if [ "$RUNNER_OS" == "Windows" ]; then
+            SEP=";"
+            MODE="--onedir"  # CUDA libs too large for --onefile
+          fi
+          pyinstaller $MODE --name vision vision.py \
             --hidden-import report \
             --hidden-import tqdm \
             --hidden-import yaml \
@@ -74,10 +80,16 @@ jobs:
         shell: bash
         run: |
           mkdir -p visionx-app/src-tauri/binaries
-          EXT=""
-          if [ "$RUNNER_OS" == "Windows" ]; then EXT=".exe"; fi
-          cp "dist/vision${EXT}" \
-             "visionx-app/src-tauri/binaries/vision-${{ matrix.target_triple }}${EXT}"
+          if [ "$RUNNER_OS" == "Windows" ]; then
+            # --onedir: copy exe as sidecar, _internal as resources
+            cp "dist/vision/vision.exe" \
+               "visionx-app/src-tauri/binaries/vision-${{ matrix.target_triple }}.exe"
+            cp -r "dist/vision/_internal" "visionx-app/src-tauri/resources/_internal"
+          else
+            # --onefile: single binary
+            cp "dist/vision" \
+               "visionx-app/src-tauri/binaries/vision-${{ matrix.target_triple }}"
+          fi
 
       - name: Place resources and download default model
         shell: bash
