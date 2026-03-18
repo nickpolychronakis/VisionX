@@ -80,8 +80,15 @@ jobs:
         run: |
           mkdir -p visionx-app/src-tauri/resources/models
           cp config.yaml tracker.yaml visionx-app/src-tauri/resources/
-          curl -L -o visionx-app/src-tauri/resources/models/yoloe-26x-seg.pt \
-            "https://github.com/ultralytics/assets/releases/download/v8.3.0/yoloe-26x-seg.pt"
+          curl -L --fail -o visionx-app/src-tauri/resources/models/yoloe-26x-seg.pt \
+            "https://github.com/ultralytics/assets/releases/download/v8.4.0/yoloe-26x-seg.pt"
+          # Verify download integrity (must be >100MB)
+          FILE_SIZE=$(wc -c < visionx-app/src-tauri/resources/models/yoloe-26x-seg.pt | tr -d ' ')
+          echo "Model file size: ${FILE_SIZE} bytes"
+          if [ "$FILE_SIZE" -lt 100000000 ]; then
+            echo "ERROR: Model file too small (${FILE_SIZE} bytes). Download likely failed."
+            exit 1
+          fi
 
       - name: Install pnpm
         uses: pnpm/action-setup@v4
