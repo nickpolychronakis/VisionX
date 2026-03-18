@@ -193,7 +193,8 @@ def process_video(source: str, yolo: YOLO, cfg: dict, args, video_index: int = 1
     tracks = {}  # track_id -> detection info + thumbnail
     frame_num = 0
     total_processed = total_frames // stride
-    last_progress_pct = -1
+    last_progress_time = 0.0
+    import time as _time
 
     # Use tqdm for CLI, JSON events for GUI
     if json_progress:
@@ -201,22 +202,25 @@ def process_video(source: str, yolo: YOLO, cfg: dict, args, video_index: int = 1
     else:
         results_iter = tqdm(results, total=total_processed, desc='  Analyzing', unit='frame')
 
+    processing_start = _time.monotonic()
     for result in results_iter:
         frame_num += 1
 
-        # Emit progress for GUI (throttled to avoid flooding)
+        # Emit progress for GUI (every 0.5s for responsive updates)
         if json_progress:
-            progress_pct = int((frame_num / total_processed) * 100) if total_processed > 0 else 0
-            if progress_pct != last_progress_pct:
+            now = _time.monotonic()
+            if now - last_progress_time >= 0.5 or frame_num == total_processed:
+                elapsed = now - processing_start
+                processing_fps = frame_num / elapsed if elapsed > 0 else 0.0
                 emit_json('progress',
                     video=source_path.name,
                     frame=frame_num,
                     total_frames=total_processed,
                     video_index=video_index,
                     total_videos=total_videos,
-                    fps=fps
+                    fps=round(processing_fps, 1)
                 )
-                last_progress_pct = progress_pct
+                last_progress_time = now
 
         if save_report and result.boxes is not None and len(result.boxes):
             for i in range(len(result.boxes)):
@@ -348,12 +352,15 @@ def process_video_chain(sources: list[str], yolo: YOLO, cfg: dict, args) -> str 
     tracks = {}
     global_frame_num = 0
     cumulative_time = 0.0
-    last_progress_pct = -1
+    last_progress_time = 0.0
+    import time as _time
 
     # Progress bar for all videos combined
+    total_to_process = total_all_frames // stride
     if not json_progress:
-        pbar = tqdm(total=total_all_frames // stride, desc='  Analyzing chain', unit='frame')
+        pbar = tqdm(total=total_to_process, desc='  Analyzing chain', unit='frame')
 
+    processing_start = _time.monotonic()
     for video_idx, info in enumerate(video_info):
         source = info['source']
         fps = info['fps']
@@ -383,19 +390,21 @@ def process_video_chain(sources: list[str], yolo: YOLO, cfg: dict, args) -> str 
             frame_in_video += 1
             global_frame_num += 1
 
-            # Update progress (throttled to avoid flooding)
+            # Update progress (every 0.5s for responsive updates)
             if json_progress:
-                progress_pct = int((global_frame_num / (total_all_frames // stride)) * 100)
-                if progress_pct != last_progress_pct:
+                now = _time.monotonic()
+                if now - last_progress_time >= 0.5 or global_frame_num == total_to_process:
+                    elapsed = now - processing_start
+                    processing_fps = global_frame_num / elapsed if elapsed > 0 else 0.0
                     emit_json('progress',
                         video=source_name,
                         frame=global_frame_num,
-                        total_frames=total_all_frames // stride,
+                        total_frames=total_to_process,
                         video_index=video_idx + 1,
                         total_videos=len(sources),
-                        fps=fps
+                        fps=round(processing_fps, 1)
                     )
-                    last_progress_pct = progress_pct
+                    last_progress_time = now
             else:
                 pbar.update(1)
 

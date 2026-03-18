@@ -27,6 +27,17 @@ const overallPercent = computed(() => {
 const videoName = computed(() => {
   return props.currentVideo.split("/").pop() || props.currentVideo;
 });
+
+const estimatedTimeLeft = computed(() => {
+  if (props.fps <= 0 || props.currentFrame <= 0) return "";
+  const remaining = props.totalFrames - props.currentFrame;
+  const seconds = Math.round(remaining / props.fps);
+  if (seconds < 60) return `~${seconds}s`;
+  if (seconds < 3600) return `~${Math.round(seconds / 60)}m`;
+  const h = Math.floor(seconds / 3600);
+  const m = Math.round((seconds % 3600) / 60);
+  return `~${h}h ${m}m`;
+});
 </script>
 
 <template>
@@ -77,7 +88,11 @@ const videoName = computed(() => {
       <div class="stats">
         <div class="stat">
           <span class="stat-value">{{ fps.toFixed(1) }}</span>
-          <span class="stat-label">FPS</span>
+          <span class="stat-label">frames/sec</span>
+        </div>
+        <div v-if="estimatedTimeLeft" class="stat">
+          <span class="stat-value">{{ estimatedTimeLeft }}</span>
+          <span class="stat-label">Remaining</span>
         </div>
       </div>
     </template>
