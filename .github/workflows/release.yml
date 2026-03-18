@@ -62,8 +62,12 @@ jobs:
             --hidden-import report \
             --hidden-import tqdm \
             --hidden-import yaml \
+            --hidden-import clip \
+            --hidden-import ftfy \
+            --hidden-import regex \
             --hidden-import ultralytics \
             --collect-all ultralytics \
+            --collect-all clip \
             --add-data "report.py${SEP}."
 
       - name: Place sidecar binary

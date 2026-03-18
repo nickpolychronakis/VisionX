@@ -1,3 +1,6 @@
 ultralytics
 pyyaml
 tqdm
+ftfy
+regex
+clip @ git+https://github.com/openai/CLIP.git
