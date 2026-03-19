@@ -23,6 +23,18 @@ def generate_report(tracks: dict, output_dir: str, video_name: str, video_path: 
         first_ts = format_timestamp(track['first_seen'])
         last_ts = format_timestamp(track['last_seen'])
 
+        # Dwell time
+        dwell = track.get('dwell_time', 0)
+        if dwell >= 3600:
+            dwell_str = f"{int(dwell // 3600)}h {int((dwell % 3600) // 60)}m"
+        elif dwell >= 60:
+            dwell_str = f"{int(dwell // 60)}m {int(dwell % 60)}s"
+        else:
+            dwell_str = f"{int(dwell)}s"
+
+        # Direction arrow
+        direction = track.get('direction', '●')
+
         # Check if we have file info (chain mode)
         first_file = track.get('first_seen_file')
         last_file = track.get('last_seen_file')
@@ -44,6 +56,10 @@ def generate_report(tracks: dict, output_dir: str, video_name: str, video_path: 
             <div class="info">
                 <div class="title">{track['class'].upper()} #{track_id}</div>
                 <div class="confidence">Confidence: {track['confidence']:.0%}</div>
+                <div class="meta">
+                    <span class="direction" title="Direction">{direction}</span>
+                    <span class="dwell" title="Duration">{dwell_str}</span>
+                </div>
                 <div class="timestamps">
                     <span class="ts" onclick="copyTimestamp('{first_ts}')" title="Click to copy timestamp">
                         First: {first_display}
@@ -190,7 +206,21 @@ def generate_report(tracks: dict, output_dir: str, video_name: str, video_path: 
         }}
         .confidence {{
             color: #4ade80;
-            margin-bottom: 10px;
+            margin-bottom: 5px;
+        }}
+        .meta {{
+            display: flex;
+            gap: 12px;
+            margin-bottom: 8px;
+            align-items: center;
+        }}
+        .direction {{
+            font-size: 1.4em;
+            line-height: 1;
+        }}
+        .dwell {{
+            color: #fbbf24;
+            font-size: 0.9em;
         }}
         .timestamps {{
             display: flex;

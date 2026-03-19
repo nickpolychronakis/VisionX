@@ -420,22 +420,49 @@ def process_video(source: str, yolo: YOLO, cfg: dict, args, video_index: int = 1
                     if x2 > x1 and y2 > y1:
                         thumb_crop = result.orig_img[y1:y2, x1:x2].copy()
 
+                    # Calculate bbox center for direction tracking
+                    cx = (x1 + x2) / 2
+                    cy = (y1 + y2) / 2
+
+                    existing = tracks.get(track_id, {})
                     tracks[track_id] = {
                         'class': class_name,
                         'confidence': det_conf,
-                        'first_seen': tracks.get(track_id, {}).get('first_seen', timestamp),
+                        'first_seen': existing.get('first_seen', timestamp),
                         'last_seen': timestamp,
                         'thumbnail': thumb_crop,
+                        'first_pos': existing.get('first_pos', (cx, cy)),
+                        'last_pos': (cx, cy),
                     }
                 else:
-                    # Always update last_seen
+                    # Always update last_seen and position
                     tracks[track_id]['last_seen'] = timestamp
+                    x1, y1, x2, y2 = map(int, box.tolist())
+                    tracks[track_id]['last_pos'] = ((x1 + x2) / 2, (y1 + y2) / 2)
 
-    # Batch encode thumbnails (deferred from hot loop)
+    # Post-process tracks: encode thumbnails, calc dwell time & direction
     for track_id, track in tracks.items():
         if track['thumbnail'] is not None:
             _, buffer = cv2.imencode('.jpg', track['thumbnail'], [cv2.IMWRITE_JPEG_QUALITY, 85])
             track['thumbnail'] = base64.b64encode(buffer).decode('utf-8')
+
+        # Dwell time
+        track['dwell_time'] = track['last_seen'] - track['first_seen']
+
+        # Direction arrow (8 directions + stationary)
+        first = track.get('first_pos', (0, 0))
+        last = track.get('last_pos', (0, 0))
+        dx = last[0] - first[0]
+        dy = last[1] - first[1]
+        min_movement = 30  # pixels — ignore tiny movements
+        if abs(dx) < min_movement and abs(dy) < min_movement:
+            track['direction'] = '●'  # stationary
+        else:
+            import math
+            angle = math.degrees(math.atan2(-dy, dx))  # -dy because y grows downward
+            arrows = ['→', '↗', '↑', '↖', '←', '↙', '↓', '↘']
+            idx = round(angle / 45) % 8
+            track['direction'] = arrows[idx]
 
     # Generate HTML report
     report_path = None
@@ -600,19 +627,27 @@ def process_video_chain(sources: list[str], yolo: YOLO, cfg: dict, args) -> str 
                         if x2 > x1 and y2 > y1:
                             thumb_crop = result.orig_img[y1:y2, x1:x2].copy()
 
+                        cx = (x1 + x2) / 2
+                        cy = (y1 + y2) / 2
+
+                        existing = tracks.get(track_id, {})
                         tracks[track_id] = {
                             'class': class_name,
                             'confidence': det_conf,
-                            'first_seen': tracks.get(track_id, {}).get('first_seen', local_timestamp),
-                            'first_seen_file': tracks.get(track_id, {}).get('first_seen_file', source_name),
+                            'first_seen': existing.get('first_seen', local_timestamp),
+                            'first_seen_file': existing.get('first_seen_file', source_name),
                             'last_seen': local_timestamp,
                             'last_seen_file': source_name,
                             'thumbnail': thumb_crop,
+                            'first_pos': existing.get('first_pos', (cx, cy)),
+                            'last_pos': (cx, cy),
                         }
                     else:
-                        # Update last_seen
+                        # Update last_seen and position
                         tracks[track_id]['last_seen'] = local_timestamp
                         tracks[track_id]['last_seen_file'] = source_name
+                        x1, y1, x2, y2 = map(int, box.tolist())
+                        tracks[track_id]['last_pos'] = ((x1 + x2) / 2, (y1 + y2) / 2)
 
         # Add this video's duration to cumulative time
         cumulative_time += info['frames'] / fps
@@ -620,11 +655,27 @@ def process_video_chain(sources: list[str], yolo: YOLO, cfg: dict, args) -> str 
     if not json_progress:
         pbar.close()
 
-    # Batch encode thumbnails (deferred from hot loop)
+    # Post-process tracks: encode thumbnails, calc dwell time & direction
+    import math
     for track_id, track in tracks.items():
         if track['thumbnail'] is not None:
             _, buffer = cv2.imencode('.jpg', track['thumbnail'], [cv2.IMWRITE_JPEG_QUALITY, 85])
             track['thumbnail'] = base64.b64encode(buffer).decode('utf-8')
+
+        track['dwell_time'] = track['last_seen'] - track['first_seen']
+
+        first = track.get('first_pos', (0, 0))
+        last = track.get('last_pos', (0, 0))
+        dx = last[0] - first[0]
+        dy = last[1] - first[1]
+        min_movement = 30
+        if abs(dx) < min_movement and abs(dy) < min_movement:
+            track['direction'] = '●'
+        else:
+            angle = math.degrees(math.atan2(-dy, dx))
+            arrows = ['→', '↗', '↑', '↖', '←', '↙', '↓', '↘']
+            idx = round(angle / 45) % 8
+            track['direction'] = arrows[idx]
 
     # Generate combined report
     report_path = None
