@@ -69,8 +69,16 @@ async fn check_setup(app: AppHandle) -> Result<setup::SetupStatus, String> {
     logger.info(&format!("App started, version {}", app.package_info().version));
     logger.info("Checking setup status...");
 
-    let status = setup::check_setup(&data_dir);
-    logger.info(&format!("Setup needed: {}", status.needs_setup));
+    let current_version = app.package_info().version.to_string();
+    let status = setup::check_setup(&data_dir, &current_version);
+    logger.info(&format!("Setup needed: {} (app v{}, setup v{})",
+        status.needs_setup, current_version,
+        std::fs::read_to_string(data_dir.join("setup.json"))
+            .ok()
+            .and_then(|c| serde_json::from_str::<serde_json::Value>(&c).ok())
+            .and_then(|v| v["app_version"].as_str().map(String::from))
+            .unwrap_or_else(|| "none".to_string())
+    ));
 
     Ok(status)
 }

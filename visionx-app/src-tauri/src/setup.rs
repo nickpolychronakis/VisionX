@@ -105,16 +105,20 @@ fn find_system_python(logger: &Logger) -> Option<PathBuf> {
     None
 }
 
-/// Check if setup has been completed
-pub fn check_setup(data_dir: &Path) -> SetupStatus {
+/// Check if setup has been completed (also re-triggers on app version change)
+pub fn check_setup(data_dir: &Path, current_version: &str) -> SetupStatus {
     let setup_json_path = data_dir.join("setup.json");
 
     if let Ok(content) = std::fs::read_to_string(&setup_json_path) {
         if let Ok(setup) = serde_json::from_str::<SetupJson>(&content) {
+            // If app version changed, force re-setup to install any new deps
+            let version_changed = setup.app_version != current_version;
+            let base_ready = setup.python_ready && setup.packages_ready && setup.model_ready;
+
             return SetupStatus {
-                needs_setup: !(setup.python_ready && setup.packages_ready && setup.model_ready),
+                needs_setup: !base_ready || version_changed,
                 python_ready: setup.python_ready,
-                packages_ready: setup.packages_ready,
+                packages_ready: if version_changed { false } else { setup.packages_ready },
                 model_ready: setup.model_ready,
                 gpu_detected: setup.gpu_detected,
                 gpu_name: String::new(),
@@ -447,17 +451,31 @@ pub async fn run_setup(
         },
     );
 
-    if !check_python_module(&python_exe, "ultralytics", if use_target { Some(&packages_dir) } else { None }, logger) {
-        logger.info("Installing ultralytics and dependencies");
-        let mut pip_args = vec![
-            "-m", "pip", "install",
-            "ultralytics", "pyyaml", "tqdm", "ftfy", "regex", "lap",
-        ];
-        let target_str = packages_dir.to_string_lossy().to_string();
+    // Check each required module and collect missing ones
+    let required_packages = vec![
+        ("ultralytics", "ultralytics"),
+        ("yaml", "pyyaml"),
+        ("tqdm", "tqdm"),
+        ("ftfy", "ftfy"),
+        ("regex", "regex"),
+        ("lap", "lap"),
+    ];
+    let pkg_dir_opt = if use_target { Some(packages_dir.as_path()) } else { None };
+    let target_str = packages_dir.to_string_lossy().to_string();
+
+    let missing: Vec<&str> = required_packages.iter()
+        .filter(|(module, _)| !check_python_module(&python_exe, module, pkg_dir_opt, logger))
+        .map(|(_, pkg)| *pkg)
+        .collect();
+
+    if !missing.is_empty() {
+        logger.info(&format!("Installing missing packages: {}", missing.join(", ")));
+        let mut pip_args: Vec<&str> = vec!["-m", "pip", "install"];
         if use_target {
-            pip_args.insert(3, "--target");
-            pip_args.insert(4, &target_str);
+            pip_args.push("--target");
+            pip_args.push(&target_str);
         }
+        pip_args.extend(missing);
 
         run_command(
             &python_exe,
@@ -465,30 +483,29 @@ pub async fn run_setup(
             if use_target { Some(("PYTHONPATH", packages_dir.to_str().unwrap())) } else { None },
             logger,
         )?;
-
-        // Install CLIP separately (git dependency)
-        if !check_python_module(&python_exe, "clip", if use_target { Some(&packages_dir) } else { None }, logger) {
-            logger.info("Installing OpenAI CLIP");
-            let mut clip_args = vec![
-                "-m", "pip", "install",
-                "clip@https://github.com/openai/CLIP/archive/refs/heads/main.zip",
-            ];
-            if use_target {
-                clip_args.insert(3, "--target");
-                clip_args.insert(4, &target_str);
-            }
-
-            run_command(
-                &python_exe,
-                &clip_args,
-                if use_target { Some(("PYTHONPATH", packages_dir.to_str().unwrap())) } else { None },
-                logger,
-            )?;
-        }
-
-        logger.info("Dependencies installed successfully");
+        logger.info("Packages installed successfully");
     } else {
-        logger.info("Dependencies already installed, skipping");
+        logger.info("All packages already installed");
+    }
+
+    // CLIP: check separately (zip dependency)
+    if !check_python_module(&python_exe, "clip", pkg_dir_opt, logger) {
+        logger.info("Installing OpenAI CLIP");
+        let mut clip_args: Vec<&str> = vec![
+            "-m", "pip", "install",
+        ];
+        if use_target {
+            clip_args.push("--target");
+            clip_args.push(&target_str);
+        }
+        clip_args.push("clip@https://github.com/openai/CLIP/archive/refs/heads/main.zip");
+
+        run_command(
+            &python_exe,
+            &clip_args,
+            if use_target { Some(("PYTHONPATH", packages_dir.to_str().unwrap())) } else { None },
+            logger,
+        )?;
     }
 
     // === Step 4: Download default model ===
@@ -741,7 +758,7 @@ mod tests {
     #[test]
     fn test_check_setup_no_file() {
         let dir = tempdir().unwrap();
-        let status = check_setup(dir.path());
+        let status = check_setup(dir.path(), "0.4.0");
         assert!(status.needs_setup);
         assert!(!status.python_ready);
         assert!(!status.packages_ready);
@@ -767,7 +784,7 @@ mod tests {
         let json = serde_json::to_string(&setup).unwrap();
         fs::write(dir.path().join("setup.json"), json).unwrap();
 
-        let status = check_setup(dir.path());
+        let status = check_setup(dir.path(), "0.4.0");
         assert!(!status.needs_setup);
         assert!(status.python_ready);
         assert!(status.packages_ready);
@@ -793,7 +810,7 @@ mod tests {
         let json = serde_json::to_string(&setup).unwrap();
         fs::write(dir.path().join("setup.json"), json).unwrap();
 
-        let status = check_setup(dir.path());
+        let status = check_setup(dir.path(), "0.4.0");
         assert!(status.needs_setup); // Should need setup because model missing
     }
 
