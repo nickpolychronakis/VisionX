@@ -20,9 +20,7 @@ const selectedFiles = ref<string[]>([]);
 const settings = ref({
   confidence: 0.65,
   stride: 1,
-  halfPrecision: false,
   imgsz: 640,
-  parallel: 1,
   outputDir: "",
   searchPrompts: [] as string[],
 });
@@ -110,9 +108,30 @@ onUnmounted(() => {
   if (unlistenStatus) unlistenStatus();
 });
 
+// Video resolution detection
+const videoResolution = ref(0);
+
+async function detectResolution(files: string[]) {
+  if (files.length === 0) {
+    videoResolution.value = 0;
+    return;
+  }
+  try {
+    const res = await invoke<number>("get_video_resolution", { files });
+    videoResolution.value = res;
+    // Auto-set imgsz to min(640, video resolution) as default
+    if (res > 0 && res < settings.value.imgsz) {
+      settings.value.imgsz = Math.max(320, Math.min(res, 640));
+    }
+  } catch {
+    videoResolution.value = 0;
+  }
+}
+
 // Methods
 function onFilesSelected(files: string[]) {
   selectedFiles.value = files;
+  detectResolution(files);
 }
 
 function removeFile(index: number) {
@@ -143,9 +162,9 @@ async function startProcessing() {
       config: {
         confidence: settings.value.confidence,
         stride: settings.value.stride,
-        half_precision: settings.value.halfPrecision,
+        half_precision: false,
         imgsz: settings.value.imgsz,
-        parallel: settings.value.parallel,
+        parallel: 1,
         output_dir: settings.value.outputDir,
         search_prompts: settings.value.searchPrompts,
       },
@@ -243,7 +262,7 @@ function startNew() {
           </ul>
         </div>
 
-        <SettingsPanel v-model="settings" />
+        <SettingsPanel v-model="settings" :videoResolution="videoResolution" />
 
         <div class="actions">
           <button

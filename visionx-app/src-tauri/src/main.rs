@@ -346,6 +346,50 @@ fn cancel_processing(state: tauri::State<'_, Arc<Mutex<ProcessState>>>) -> Resul
 }
 
 // ============================================================
+// Video info commands
+// ============================================================
+
+#[tauri::command]
+async fn get_video_resolution(app: AppHandle, files: Vec<String>) -> Result<u32, String> {
+    if files.is_empty() {
+        return Ok(0);
+    }
+
+    let data_dir = app.path().app_data_dir()
+        .map_err(|e| format!("Failed to get data dir: {}", e))?;
+    let python_exe = setup::python_exe_path(&data_dir);
+
+    if !python_exe.exists() {
+        return Ok(640); // Default if Python not ready
+    }
+
+    // Get max resolution from all videos
+    let script = format!(
+        "import cv2,sys,json;mx=0\nfor f in sys.argv[1:]:\n c=cv2.VideoCapture(f)\n w,h=int(c.get(3)),int(c.get(4))\n mx=max(mx,w,h)\n c.release()\nprint(mx)",
+    );
+
+    let mut args = vec!["-c".to_string(), script];
+    args.extend(files);
+
+    let packages_dir = setup::packages_dir_path(&data_dir);
+    let use_system = setup::is_system_python(&data_dir);
+
+    let output = std::process::Command::new(&python_exe)
+        .args(&args)
+        .env("PYTHONUTF8", "1")
+        .env("PYTHONPATH", if use_system { String::new() } else { packages_dir.to_string_lossy().to_string() })
+        .output()
+        .map_err(|e| format!("Failed to get video info: {}", e))?;
+
+    if output.status.success() {
+        let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        Ok(stdout.parse::<u32>().unwrap_or(640))
+    } else {
+        Ok(640) // Default on error
+    }
+}
+
+// ============================================================
 // Utility commands
 // ============================================================
 
@@ -562,6 +606,8 @@ fn main() {
             // Processing
             process_videos,
             cancel_processing,
+            // Video info
+            get_video_resolution,
             // Utilities
             get_report_content,
             open_file,

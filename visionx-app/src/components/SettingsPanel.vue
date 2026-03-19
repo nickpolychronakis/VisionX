@@ -1,20 +1,46 @@
 <script setup lang="ts">
-import { ref } from "vue";
+import { ref, computed } from "vue";
 
 interface Settings {
   confidence: number;
   stride: number;
-  halfPrecision: boolean;
   imgsz: number;
-  parallel: number;
   outputDir: string;
   searchPrompts: string[];
 }
+
+const props = defineProps<{
+  videoResolution?: number; // Max resolution of selected video(s)
+}>();
 
 const settings = defineModel<Settings>({ required: true });
 
 const isExpanded = ref(false);
 const newPrompt = ref("");
+
+// Dynamic imgsz options based on video resolution
+const imgszOptions = computed(() => {
+  const maxRes = props.videoResolution || 640;
+  const options = [
+    { value: 320, label: "320px - Ταχύτατο" },
+    { value: 480, label: "480px - Γρήγορο" },
+    { value: 640, label: "640px - Κανονικό" },
+    { value: 960, label: "960px - Υψηλή" },
+    { value: 1280, label: "1280px - Πολύ υψηλή" },
+    { value: 1920, label: "1920px - Πλήρης HD" },
+  ];
+  // Only show options up to the video resolution
+  return options.filter((o) => o.value <= Math.max(maxRes, 320));
+});
+
+// Default label for imgsz
+const imgszLabel = computed(() => {
+  const maxRes = props.videoResolution || 0;
+  if (maxRes > 0 && settings.value.imgsz >= maxRes) {
+    return `${settings.value.imgsz}px (πλήρης)`;
+  }
+  return `${settings.value.imgsz}px`;
+});
 
 function addPrompt() {
   if (newPrompt.value.trim()) {
@@ -36,82 +62,19 @@ function removePrompt(index: number) {
     </button>
 
     <div v-if="isExpanded" class="settings-content">
-      <!-- Confidence -->
+      <!-- Custom Search Prompts (most important - first) -->
       <div class="setting-row">
         <label>
-          <span class="label-text">Κατώφλι Εμπιστοσύνης</span>
-          <span class="label-value">{{ settings.confidence.toFixed(2) }}</span>
+          <span class="label-text">Αναζήτηση Αντικειμένων</span>
         </label>
-        <input
-          type="range"
-          v-model.number="settings.confidence"
-          min="0"
-          max="1"
-          step="0.05"
-        />
-      </div>
-
-      <!-- Stride -->
-      <div class="setting-row">
-        <label>
-          <span class="label-text">Βήμα Καρέ</span>
-          <span class="label-value">Κάθε {{ settings.stride }} καρέ</span>
-        </label>
-        <input
-          type="range"
-          v-model.number="settings.stride"
-          min="1"
-          max="10"
-          step="1"
-        />
-      </div>
-
-      <!-- Image Size -->
-      <div class="setting-row">
-        <label>
-          <span class="label-text">Μέγεθος Ανάλυσης</span>
-          <span class="label-value">{{ settings.imgsz }}px</span>
-        </label>
-        <select v-model.number="settings.imgsz">
-          <option :value="320">320px - Ταχύτατο</option>
-          <option :value="480">480px - Γρήγορο</option>
-          <option :value="640">640px - Κανονικό</option>
-        </select>
-      </div>
-
-      <!-- Parallel Workers -->
-      <div class="setting-row">
-        <label>
-          <span class="label-text">Παράλληλοι Workers</span>
-          <span class="label-value">{{ settings.parallel === 1 ? 'Σειριακά' : settings.parallel + ' workers' }}</span>
-        </label>
-        <input
-          type="range"
-          v-model.number="settings.parallel"
-          min="1"
-          max="4"
-          step="1"
-        />
-      </div>
-
-      <!-- Half Precision -->
-      <div class="setting-row checkbox">
-        <label>
-          <input type="checkbox" v-model="settings.halfPrecision" />
-          <span class="label-text">Μισή Ακρίβεια (FP16) - Ταχύτερη επεξεργασία</span>
-        </label>
-      </div>
-
-      <!-- Custom Search Prompts -->
-      <div class="setting-row">
-        <label>
-          <span class="label-text">Προσαρμοσμένη Αναζήτηση (προαιρετικό)</span>
-        </label>
+        <p class="setting-hint">
+          Προεπιλογή: αυτοκίνητα, άτομα, μοτοσικλέτες. Προσθέστε δικά σας:
+        </p>
         <div class="prompts-input">
           <input
             type="text"
             v-model="newPrompt"
-            placeholder="π.χ. λευκό αυτοκίνητο, κόκκινη μοτοσικλέτα"
+            placeholder="π.χ. λευκό αυτοκίνητο, σκύλος, ποδήλατο"
             @keyup.enter="addPrompt"
           />
           <button class="secondary" @click="addPrompt">Προσθήκη</button>
@@ -126,6 +89,63 @@ function removePrompt(index: number) {
             <button @click="removePrompt(index)">×</button>
           </span>
         </div>
+      </div>
+
+      <!-- Stride -->
+      <div class="setting-row">
+        <label>
+          <span class="label-text">Ταχύτητα Ανάλυσης</span>
+          <span class="label-value">{{
+            settings.stride === 1
+              ? "Κάθε καρέ"
+              : `Κάθε ${settings.stride} καρέ (${settings.stride}x ταχύτερα)`
+          }}</span>
+        </label>
+        <input
+          type="range"
+          v-model.number="settings.stride"
+          min="1"
+          max="10"
+          step="1"
+        />
+      </div>
+
+      <!-- Image Size -->
+      <div class="setting-row">
+        <label>
+          <span class="label-text">Ανάλυση Επεξεργασίας</span>
+          <span class="label-value">{{ imgszLabel }}</span>
+        </label>
+        <select v-model.number="settings.imgsz">
+          <option
+            v-for="opt in imgszOptions"
+            :key="opt.value"
+            :value="opt.value"
+          >
+            {{ opt.label }}
+          </option>
+        </select>
+        <p class="setting-hint" v-if="videoResolution && videoResolution > 0">
+          Ανάλυση βίντεο: {{ videoResolution }}px
+        </p>
+      </div>
+
+      <!-- Confidence (advanced) -->
+      <div class="setting-row">
+        <label>
+          <span class="label-text">Ευαισθησία Ανίχνευσης</span>
+          <span class="label-value">{{ (settings.confidence * 100).toFixed(0) }}%</span>
+        </label>
+        <input
+          type="range"
+          v-model.number="settings.confidence"
+          min="0.1"
+          max="1"
+          step="0.05"
+        />
+        <p class="setting-hint">
+          Υψηλή = λιγότερα αλλά πιο σίγουρα αποτελέσματα
+        </p>
       </div>
     </div>
   </div>
@@ -190,15 +210,10 @@ function removePrompt(index: number) {
   color: var(--accent);
 }
 
-.setting-row.checkbox label {
-  flex-direction: row;
-  gap: 10px;
-  cursor: pointer;
-}
-
-.setting-row.checkbox input {
-  width: 18px;
-  height: 18px;
+.setting-hint {
+  font-size: 0.8rem;
+  color: var(--text-secondary);
+  margin: 0;
 }
 
 input[type="range"] {

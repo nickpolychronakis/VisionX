@@ -48,6 +48,21 @@ def load_config(config_path: str = 'config.yaml') -> dict:
     return config
 
 
+def select_device_and_half(model_path: str, half_requested: bool) -> tuple:
+    """Select compute device and determine if FP16 is safe to use."""
+    if model_path.endswith('.mlpackage'):
+        return None, False  # CoreML handles precision internally
+    elif torch.cuda.is_available():
+        device = 'cuda'
+        # Disable half for segmentation models — mask post-processing has dtype bugs
+        half = half_requested and ('seg' not in model_path.lower())
+        return device, half
+    elif torch.backends.mps.is_available():
+        return 'mps', False  # MPS doesn't reliably support FP16 for all ops
+    else:
+        return 'cpu', False  # CPU doesn't support FP16
+
+
 def emit_json(event_type: str, **data):
     """Emit a JSON event to stdout for GUI consumption"""
     event = {'type': event_type, **data}
@@ -127,19 +142,9 @@ def process_video(source: str, yolo: YOLO, cfg: dict, args, video_index: int = 1
     stride = args.stride or cfg['vid_stride']
     show = args.show or cfg['show']
 
-    # Device - CoreML handles device selection automatically
+    # Device selection
     model_path = str(getattr(yolo, 'ckpt_path', ''))
-    if model_path.endswith('.mlpackage'):
-        device = None  # CoreML uses Neural Engine + GPU + CPU automatically
-        half = False  # CoreML handles precision internally
-    elif torch.cuda.is_available():
-        device = 'cuda'
-    elif torch.backends.mps.is_available():
-        device = 'mps'
-        half = False  # MPS doesn't reliably support FP16 for all ops
-    else:
-        device = 'cpu'
-        half = False  # CPU doesn't support FP16
+    device, half = select_device_and_half(model_path, half)
 
     # Get video info
     cap = cv2.VideoCapture(source)
@@ -324,19 +329,9 @@ def process_video_chain(sources: list[str], yolo: YOLO, cfg: dict, args) -> str 
     save_report = cfg['save_report']
     tracker_path = getattr(args, '_tracker_path', 'tracker.yaml')
 
-    # Device - CoreML handles device selection automatically
+    # Device selection
     model_path = str(getattr(yolo, 'ckpt_path', ''))
-    if model_path.endswith('.mlpackage'):
-        device = None  # CoreML uses Neural Engine + GPU + CPU automatically
-        half = False  # CoreML handles precision internally
-    elif torch.cuda.is_available():
-        device = 'cuda'
-    elif torch.backends.mps.is_available():
-        device = 'mps'
-        half = False  # MPS doesn't reliably support FP16 for all ops
-    else:
-        device = 'cpu'
-        half = False  # CPU doesn't support FP16
+    device, half = select_device_and_half(model_path, half)
 
     # Calculate total frames across all videos
     video_info = []
