@@ -65,10 +65,12 @@ function removePrompt(index: number) {
       <!-- Custom Search Prompts (most important - first) -->
       <div class="setting-row">
         <label>
-          <span class="label-text">Αναζήτηση Αντικειμένων</span>
+          <span class="label-text">Τι ψάχνετε στο βίντεο;</span>
         </label>
         <p class="setting-hint">
-          Προεπιλογή: αυτοκίνητα, άτομα, μοτοσικλέτες. Προσθέστε δικά σας:
+          Η ανάλυση εντοπίζει αυτόματα: αυτοκίνητα, άτομα και μοτοσικλέτες.
+          Αν θέλετε να αναζητήσετε κάτι συγκεκριμένο, προσθέστε το παρακάτω.
+          Μπορείτε να γράψετε σε οποιαδήποτε γλώσσα.
         </p>
         <div class="prompts-input">
           <input
@@ -94,11 +96,11 @@ function removePrompt(index: number) {
       <!-- Stride -->
       <div class="setting-row">
         <label>
-          <span class="label-text">Ταχύτητα Ανάλυσης</span>
+          <span class="label-text">Παράλειψη Καρέ</span>
           <span class="label-value">{{
             settings.stride === 1
-              ? "Κάθε καρέ"
-              : `Κάθε ${settings.stride} καρέ (${settings.stride}x ταχύτερα)`
+              ? "Χωρίς παράλειψη"
+              : `1 στα ${settings.stride} καρέ`
           }}</span>
         </label>
         <input
@@ -108,12 +110,18 @@ function removePrompt(index: number) {
           max="10"
           step="1"
         />
+        <p class="setting-hint">
+          {{ settings.stride === 1
+            ? "Αναλύονται όλα τα καρέ — μέγιστη ακρίβεια, πιο αργά."
+            : `Αναλύεται 1 στα ${settings.stride} καρέ — ${settings.stride}x ταχύτερα, αλλά μπορεί να χαθούν στιγμιαίες κινήσεις.`
+          }}
+        </p>
       </div>
 
       <!-- Image Size -->
       <div class="setting-row">
         <label>
-          <span class="label-text">Ανάλυση Επεξεργασίας</span>
+          <span class="label-text">Ποιότητα Ανάλυσης</span>
           <span class="label-value">{{ imgszLabel }}</span>
         </label>
         <select v-model.number="settings.imgsz">
@@ -125,15 +133,19 @@ function removePrompt(index: number) {
             {{ opt.label }}
           </option>
         </select>
-        <p class="setting-hint" v-if="videoResolution && videoResolution > 0">
-          Ανάλυση βίντεο: {{ videoResolution }}px
+        <p class="setting-hint">
+          Κάθε καρέ συρρικνώνεται σε αυτό το μέγεθος πριν αναλυθεί.
+          Μεγαλύτερη τιμή = καλύτερη αναγνώριση μικρών αντικειμένων, αλλά πιο αργή επεξεργασία.
+          <template v-if="videoResolution && videoResolution > 0">
+            <br/>Το βίντεό σας έχει ανάλυση {{ videoResolution }}px.
+          </template>
         </p>
       </div>
 
-      <!-- Confidence (advanced) -->
+      <!-- Confidence -->
       <div class="setting-row">
         <label>
-          <span class="label-text">Ευαισθησία Ανίχνευσης</span>
+          <span class="label-text">Βεβαιότητα Αναγνώρισης</span>
           <span class="label-value">{{ (settings.confidence * 100).toFixed(0) }}%</span>
         </label>
         <input
@@ -144,7 +156,12 @@ function removePrompt(index: number) {
           step="0.05"
         />
         <p class="setting-hint">
-          Υψηλή = λιγότερα αλλά πιο σίγουρα αποτελέσματα
+          {{ settings.confidence >= 0.7
+            ? "Υψηλή βεβαιότητα — εμφανίζονται μόνο τα αντικείμενα που η AI είναι πολύ σίγουρη. Λιγότερα λάθη, αλλά μπορεί να χαθούν κάποια."
+            : settings.confidence >= 0.4
+              ? "Μέτρια βεβαιότητα — καλή ισορροπία μεταξύ ακρίβειας και κάλυψης."
+              : "Χαμηλή βεβαιότητα — εμφανίζονται περισσότερα αντικείμενα, αλλά αυξάνονται και τα λανθασμένα αποτελέσματα."
+          }}
         </p>
       </div>
     </div>
