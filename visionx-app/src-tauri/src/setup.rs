@@ -331,6 +331,9 @@ fn run_command(
 
     let mut cmd = Command::new(exe);
     cmd.args(args);
+    // Fix Unicode encoding issues on Windows (Greek/CJK usernames, etc.)
+    cmd.env("PYTHONUTF8", "1");
+    cmd.env("PYTHONIOENCODING", "utf-8");
 
     if let Some((key, val)) = env {
         cmd.env(key, val);
@@ -468,7 +471,7 @@ pub async fn run_setup(
             logger.info("Installing OpenAI CLIP");
             let mut clip_args = vec![
                 "-m", "pip", "install",
-                "clip@git+https://github.com/openai/CLIP.git",
+                "clip@https://github.com/openai/CLIP/archive/refs/heads/main.zip",
             ];
             if use_target {
                 clip_args.insert(3, "--target");

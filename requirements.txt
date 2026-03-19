@@ -3,4 +3,4 @@ pyyaml
 tqdm
 ftfy
 regex
-clip @ git+https://github.com/openai/CLIP.git
+clip @ https://github.com/openai/CLIP/archive/refs/heads/main.zip
