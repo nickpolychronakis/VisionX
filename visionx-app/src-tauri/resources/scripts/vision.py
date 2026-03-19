@@ -6,6 +6,10 @@ import base64
 import json
 import os
 import sys
+
+# Ensure the script's own directory is in sys.path (for 'from report import ...')
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+
 import yaml
 import cv2
 import torch
