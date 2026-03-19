@@ -216,8 +216,11 @@ async function retry() {
             <template v-if="currentStepStatus(step.key) === 'active' && total > 0">
               {{ formatSize(downloaded) }} / {{ formatSize(total) }}
             </template>
+            <template v-else-if="currentStepStatus(step.key) === 'active' && total === 0">
+              Εγκατάσταση...
+            </template>
             <template v-else-if="currentStepStatus(step.key) === 'done'">
-              Done
+              OK
             </template>
             <template v-else>
               {{ step.size }}
@@ -238,7 +241,6 @@ async function retry() {
         </div>
       </div>
 
-      <button class="btn-secondary" @click="openLog">View Log</button>
     </template>
 
     <!-- Complete -->

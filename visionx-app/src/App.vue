@@ -215,7 +215,7 @@ function startNew() {
         <span class="subtitle">Ανίχνευση & Παρακολούθηση Αντικειμένων σε Βίντεο</span>
       </div>
       <button
-        v-if="currentView !== 'landing' && !isProcessing"
+        v-if="currentView !== 'landing' && currentView !== 'setup' && !isProcessing"
         class="info-btn"
         @click="currentView = 'landing'"
         title="Πληροφορίες"
@@ -369,16 +369,30 @@ function startNew() {
   flex-direction: column;
   gap: 20px;
   flex: 1;
-  overflow: hidden;
+  min-height: 0;
 }
 
-.view-select,
-.view-processing,
+.view-select {
+  display: flex;
+  flex-direction: column;
+  gap: 20px;
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+}
+
+.view-processing {
+  display: flex;
+  flex-direction: column;
+  gap: 20px;
+}
+
 .view-results {
   display: flex;
   flex-direction: column;
   gap: 20px;
   flex: 1;
+  min-height: 0;
   overflow: hidden;
 }
 

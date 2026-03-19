@@ -171,7 +171,6 @@ function removePrompt(index: number) {
 <style scoped>
 .settings-panel {
   padding: 0;
-  overflow: hidden;
 }
 
 .toggle-btn {
@@ -203,6 +202,8 @@ function removePrompt(index: number) {
   padding: 0 20px 20px;
   display: flex;
   flex-direction: column;
+  max-height: 60vh;
+  overflow-y: auto;
   gap: 20px;
 }
 

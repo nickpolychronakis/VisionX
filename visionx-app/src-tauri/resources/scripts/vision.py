@@ -651,8 +651,8 @@ Examples:
         device_name = 'CPU'
 
     if json_progress:
-        emit_json('status', message=f'Using: {device_name}')
-        emit_json('status', message=f'Loading {Path(model_path).name}...')
+        emit_json('status', message=f'Επεξεργαστής: {device_name}')
+        emit_json('status', message=f'Φόρτωση μοντέλου AI ({Path(model_path).name})...')
     else:
         print(f'Using: {device_name}')
         print(f'Loading {Path(model_path).name}...')
@@ -660,11 +660,13 @@ Examples:
     # Load model once
     yolo = YOLO(model_path)
     if not using_coreml:
+        if json_progress:
+            emit_json('status', message='Προετοιμασία αναγνώρισης αντικειμένων...')
         yolo.set_classes(prompts)  # type: ignore[misc]  # CoreML has classes baked in during export
 
     if json_progress:
-        emit_json('status', message=f'Detecting: {", ".join(prompts)}')
-        emit_json('status', message=f'Found {len(video_files)} video(s) to process')
+        emit_json('status', message=f'Αναζήτηση: {", ".join(prompts)}')
+        emit_json('status', message=f'{len(video_files)} βίντεο προς ανάλυση')
     else:
         print(f'Detecting: {", ".join(prompts)}')
         print(f'\nFound {len(video_files)} video(s) to process')
