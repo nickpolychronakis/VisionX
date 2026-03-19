@@ -451,7 +451,7 @@ pub async fn run_setup(
         logger.info("Installing ultralytics and dependencies");
         let mut pip_args = vec![
             "-m", "pip", "install",
-            "ultralytics", "pyyaml", "tqdm", "ftfy", "regex",
+            "ultralytics", "pyyaml", "tqdm", "ftfy", "regex", "lap",
         ];
         let target_str = packages_dir.to_string_lossy().to_string();
         if use_target {
