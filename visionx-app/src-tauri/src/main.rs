@@ -200,14 +200,24 @@ async fn process_videos(
 
     let python_str = python_exe.to_string_lossy().to_string();
     let packages_str = packages_dir.to_string_lossy().to_string();
+    let scripts_str = scripts_dir.to_string_lossy().to_string();
     let use_system_python = setup::is_system_python(&data_dir);
+
+    // Build PYTHONPATH: always include scripts dir (for report.py import)
+    let python_path = if use_system_python {
+        scripts_str.clone()
+    } else {
+        #[cfg(target_os = "windows")]
+        { format!("{};{}", packages_str, scripts_str) }
+        #[cfg(not(target_os = "windows"))]
+        { format!("{}:{}", packages_str, scripts_str) }
+    };
 
     let mut cmd = app.shell()
         .command(&python_str);
     cmd = cmd.env("PYTHONUNBUFFERED", "1");
-    if !use_system_python {
-        cmd = cmd.env("PYTHONPATH", &packages_str);
-    }
+    cmd = cmd.env("PYTHONUTF8", "1");
+    cmd = cmd.env("PYTHONPATH", &python_path);
     let (mut rx, child) = cmd
         .args(&args)
         .spawn()
