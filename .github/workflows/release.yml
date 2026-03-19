@@ -82,4 +82,4 @@ jobs:
           prerelease: false
           includeUpdaterJson: true
           tauriScript: pnpm tauri
-          args: --bundles nsis,updater
+          args: --bundles nsis
