@@ -59,7 +59,7 @@ onMounted(async () => {
     if (status.needs_setup) {
       currentView.value = "setup";
     } else {
-      currentView.value = "select";
+      currentView.value = "landing";
     }
   } catch (e) {
     console.error("Failed to check setup:", e);
@@ -208,7 +208,7 @@ function startNew() {
 </script>
 
 <template>
-  <div class="app">
+  <div class="app" :class="{ 'view-compact': currentView !== 'results' }">
     <header class="header">
       <div class="header-content">
         <h1>VisionX</h1>
@@ -233,7 +233,7 @@ function startNew() {
       <!-- Setup Wizard -->
       <SetupWizard
         v-else-if="currentView === 'setup'"
-        @complete="currentView = 'select'"
+        @complete="currentView = 'landing'"
       />
 
       <!-- Error Message -->
@@ -262,9 +262,9 @@ function startNew() {
           </ul>
         </div>
 
-        <SettingsPanel v-model="settings" :videoResolution="videoResolution" />
+        <SettingsPanel v-if="selectedFiles.length > 0" v-model="settings" :videoResolution="videoResolution" />
 
-        <div class="actions">
+        <div v-if="selectedFiles.length > 0" class="actions">
           <button
             class="primary start-btn"
             :disabled="!canProcess"
@@ -310,9 +310,12 @@ function startNew() {
   display: flex;
   flex-direction: column;
   height: 100%;
+  padding: 20px;
+}
+
+.app.view-compact {
   max-width: 900px;
   margin: 0 auto;
-  padding: 20px;
 }
 
 .header {
