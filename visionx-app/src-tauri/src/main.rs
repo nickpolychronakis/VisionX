@@ -139,6 +139,11 @@ async fn process_videos(
 
     let logger = Logger::new(&data_dir);
     logger.info(&format!("Processing {} video(s)", files.len()));
+    logger.info(&format!("Config: confidence={}, stride={}, imgsz={}, half={}",
+        config.confidence, config.stride, config.imgsz, config.half_precision));
+    for f in &files {
+        logger.info(&format!("  File: {}", f));
+    }
 
     // Paths
     let python_exe = setup::python_exe_path(&data_dir);
@@ -146,10 +151,16 @@ async fn process_videos(
     let scripts_dir = setup::scripts_dir_path(&data_dir);
     let vision_script = scripts_dir.join("vision.py");
 
+    logger.info(&format!("Python: {}", python_exe.display()));
+    logger.info(&format!("Script: {}", vision_script.display()));
+    logger.info(&format!("Packages: {}", packages_dir.display()));
+
     if !python_exe.exists() {
+        logger.error("Python not found — setup incomplete");
         return Err("Python not installed. Please run setup first.".to_string());
     }
     if !vision_script.exists() {
+        logger.error("vision.py not found — setup incomplete");
         return Err("Vision script not found. Please run setup first.".to_string());
     }
 
@@ -304,21 +315,29 @@ async fn process_videos(
             }
             CommandEvent::Stderr(line) => {
                 let line_str = String::from_utf8_lossy(&line);
+                let trimmed = line_str.trim();
+                if !trimmed.is_empty() {
+                    logger.info(&format!("Python stderr: {}", trimmed));
+                }
                 stderr_output.push_str(&line_str);
                 stderr_output.push('\n');
             }
             CommandEvent::Terminated(status) => {
+                let exit_code = status.code.unwrap_or(-1);
+                logger.info(&format!("Python process exited with code {}", exit_code));
+
                 let mut process_state = state.lock().map_err(|e| e.to_string())?;
                 process_state.child = None;
 
-                if status.code != Some(0) {
+                if exit_code != 0 {
                     if process_state.cancelled {
+                        logger.info("Processing was cancelled by user");
                         return Err("Processing cancelled".to_string());
                     }
                     let err_msg = if !stderr_output.is_empty() {
                         format!("Processing failed: {}", stderr_output)
                     } else {
-                        "Processing failed".to_string()
+                        format!("Processing failed (exit code {})", exit_code)
                     };
                     logger.error(&err_msg);
                     return Err(err_msg);

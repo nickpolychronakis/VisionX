@@ -99,6 +99,11 @@ def select_device_and_half(model_path: str, half_requested: bool) -> tuple:
         return 'cpu', False  # CPU doesn't support FP16
 
 
+def log_stderr(msg: str):
+    """Log to stderr — captured by Rust backend into visionx.log"""
+    print(msg, file=sys.stderr, flush=True)
+
+
 def emit_json(event_type: str, **data):
     """Emit a JSON event to stdout for GUI consumption"""
     event = {'type': event_type, **data}
@@ -464,12 +469,15 @@ def process_video(source: str, yolo: YOLO, cfg: dict, args, video_index: int = 1
             idx = round(angle / 45) % 8
             track['direction'] = arrows[idx]
 
+    log_stderr(f'Processing complete: {source_path.name} — {len(tracks)} tracks, {frame_num} frames analyzed')
+
     # Generate HTML report
     report_path = None
     if save_report and tracks:
         video_name = source_path.stem  # filename without extension
         output_dir = args.output or str(source_path.parent)
         report_path = generate_report(tracks, output_dir, video_name, source)
+        log_stderr(f'Report saved: {report_path}')
         if json_progress:
             emit_json('report', path=report_path)
         else:
@@ -752,6 +760,18 @@ Examples:
     if data_dir:
         os.makedirs(os.path.join(data_dir, 'models'), exist_ok=True)
 
+    # Log startup info
+    log_stderr(f'VisionX vision.py starting')
+    log_stderr(f'  Python: {sys.version}')
+    log_stderr(f'  PyTorch: {torch.__version__}')
+    log_stderr(f'  CUDA available: {torch.cuda.is_available()}')
+    if torch.cuda.is_available():
+        log_stderr(f'  GPU: {torch.cuda.get_device_name()}')
+        log_stderr(f'  CUDA version: {torch.version.cuda}')
+        log_stderr(f'  Tensor Cores: {_has_tensor_cores()}')
+    log_stderr(f'  Resource dir: {resource_dir}')
+    log_stderr(f'  Data dir: {data_dir}')
+
     # Resolve config path: explicit > resource dir > CWD fallback
     config_path = args.config
     if not config_path:
@@ -766,6 +786,9 @@ Examples:
         candidate = os.path.join(resource_dir, 'tracker.yaml')
         if os.path.exists(candidate):
             tracker_path = candidate
+
+    log_stderr(f'  Config: {config_path}')
+    log_stderr(f'  Tracker: {tracker_path}')
 
     # Store resolved paths in args for use by processing functions
     args._tracker_path = tracker_path
@@ -882,7 +905,11 @@ Examples:
         print(f'Loading {Path(model_path).name}...')
 
     # Load model once
+    log_stderr(f'Loading model: {model_path}')
+    log_stderr(f'  Device: {device_name}')
+    log_stderr(f'  Optimized: {using_optimized}')
     yolo = YOLO(model_path)
+    log_stderr(f'  Model loaded successfully')
     if not using_optimized:
         if json_progress:
             emit_json('status', message='Προετοιμασία αναγνώρισης αντικειμένων...')
