@@ -18,8 +18,8 @@ const selectedFiles = ref<string[]>([]);
 
 // Settings
 const settings = ref({
-  confidence: 0.65,
-  stride: 1,
+  confidence: 0.50,
+  stride: 3,
   imgsz: 640,
   outputDir: "",
   searchPrompts: [] as string[],

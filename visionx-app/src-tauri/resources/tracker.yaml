@@ -1,14 +1,15 @@
 # VisionX Tracker Configuration (BoT-SORT)
-# Optimized for stationary object tracking
+# Optimized for CCTV / fixed camera footage
 
 tracker_type: botsort
-track_high_thresh: 0.25
-track_low_thresh: 0.1
-new_track_thresh: 0.25
-track_buffer: 300          # 10 sec at 30fps - critical for stationary objects
-match_thresh: 0.7
-fuse_score: true
-gmc_method: none
-proximity_thresh: 0.5
-appearance_thresh: 0.5
-with_reid: false           # Disabled - track_buffer is more important for stationary
+track_high_thresh: 0.25       # First-stage detection confidence (permissive for CCTV)
+track_low_thresh: 0.1         # Second-stage (ByteTrack two-stage matching)
+new_track_thresh: 0.25        # Min confidence to create new track
+track_buffer: 300             # 10 sec at 30fps — keeps lost tracks alive
+match_thresh: 0.7             # IoU cost threshold (lower = stricter matching)
+fuse_score: true              # Fuse detection confidence into matching cost
+gmc_method: none              # No camera motion compensation (fixed cameras)
+proximity_thresh: 0.5         # Min IoU for ReID consideration
+appearance_thresh: 0.75       # Stricter appearance matching to prevent wrong merges
+with_reid: true               # Use detector features for re-identification (free with auto)
+model: auto                   # Reuse detector backbone features — zero extra model cost

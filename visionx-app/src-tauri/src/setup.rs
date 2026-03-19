@@ -452,7 +452,7 @@ pub async fn run_setup(
     );
 
     // Check each required module and collect missing ones
-    let required_packages = vec![
+    let mut required_packages = vec![
         ("ultralytics", "ultralytics"),
         ("yaml", "pyyaml"),
         ("tqdm", "tqdm"),
@@ -460,6 +460,10 @@ pub async fn run_setup(
         ("regex", "regex"),
         ("lap", "lap"),
     ];
+    // Add TensorRT for NVIDIA GPUs (massive inference speedup)
+    if use_cuda {
+        required_packages.push(("tensorrt", "tensorrt-cu12"));
+    }
     let pkg_dir_opt = if use_target { Some(packages_dir.as_path()) } else { None };
     let target_str = packages_dir.to_string_lossy().to_string();
 

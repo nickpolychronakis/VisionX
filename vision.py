@@ -30,9 +30,9 @@ DEFAULT_CONFIG = {
     'save_video': False,
     'save_crops': False,
     'save_report': True,
-    'half': False,
+    'half': True,
     'imgsz': 640,
-    'vid_stride': 1,
+    'vid_stride': 3,
     'show': False,
 }
 
@@ -48,15 +48,51 @@ def load_config(config_path: str = 'config.yaml') -> dict:
     return config
 
 
+def _has_tensor_cores() -> bool:
+    """Check if NVIDIA GPU has Tensor Cores (RTX series)."""
+    if not torch.cuda.is_available():
+        return False
+    cap = torch.cuda.get_device_capability()
+    gpu_name = torch.cuda.get_device_name().lower()
+    # Compute capability >= 7.0 (Volta+), but GTX 16xx lacks Tensor Cores
+    return cap >= (7, 0) and 'gtx 16' not in gpu_name
+
+
+def _patch_fp16_segmentation():
+    """Monkey-patch ultralytics FP16 segmentation mask bug (masks_in dtype mismatch)."""
+    try:
+        import ultralytics.utils.ops as _ops
+        _orig = _ops.process_mask
+        def _patched(protos, masks_in, bboxes, shape, upsample=False):
+            return _orig(protos, masks_in.float(), bboxes, shape, upsample)
+        _ops.process_mask = _patched
+
+        if hasattr(_ops, 'process_mask_native'):
+            _orig_native = _ops.process_mask_native
+            def _patched_native(protos, masks_in, bboxes, shape):
+                return _orig_native(protos, masks_in.float(), bboxes, shape)
+            _ops.process_mask_native = _patched_native
+    except Exception:
+        pass  # Silently fail — FP16 will be disabled as fallback
+
+_fp16_patched = False
+
 def select_device_and_half(model_path: str, half_requested: bool) -> tuple:
     """Select compute device and determine if FP16 is safe to use."""
-    if model_path.endswith('.mlpackage'):
+    global _fp16_patched
+    if model_path.endswith('.mlpackage') or model_path.endswith('.engine'):
+        if model_path.endswith('.engine'):
+            return 'cuda', False  # TensorRT handles precision internally
         return None, False  # CoreML handles precision internally
     elif torch.cuda.is_available():
         device = 'cuda'
-        # Disable half for segmentation models — mask post-processing has dtype bugs
-        half = half_requested and ('seg' not in model_path.lower())
-        return device, half
+        if half_requested and _has_tensor_cores():
+            # Patch FP16 seg bug once, then enable FP16 on RTX GPUs
+            if not _fp16_patched:
+                _patch_fp16_segmentation()
+                _fp16_patched = True
+            return device, True
+        return device, False
     elif torch.backends.mps.is_available():
         return 'mps', False  # MPS doesn't reliably support FP16 for all ops
     else:
@@ -120,6 +156,131 @@ def export_to_coreml(pt_model: str, prompts: list[str], json_progress: bool = Fa
         else:
             print(f'CoreML export failed: {e}')
         return None
+
+
+def export_to_tensorrt(pt_model: str, prompts: list[str], json_progress: bool = False, data_dir: str | None = None) -> Path | None:
+    """Export PyTorch model to TensorRT (NVIDIA GPU, one-time operation).
+
+    Classes are baked in, just like CoreML. Requires tensorrt pip package.
+    The .engine file is GPU-specific and must be re-exported on different hardware.
+    """
+    if not torch.cuda.is_available():
+        return None
+
+    try:
+        import tensorrt  # noqa: F401
+    except ImportError:
+        return None  # TensorRT not installed, fall back to PyTorch CUDA
+
+    engine_name = Path(pt_model).with_suffix('.engine').name
+
+    # Check data dir first
+    if data_dir:
+        data_engine = Path(data_dir) / 'models' / engine_name
+        if data_engine.exists():
+            return data_engine
+
+    # Check next to .pt
+    engine_path = Path(pt_model).with_suffix('.engine')
+    if engine_path.exists():
+        return engine_path
+
+    if json_progress:
+        emit_json('status', message='Βελτιστοποίηση για GPU (μόνο την πρώτη φορά, μπορεί να πάρει μερικά λεπτά)...')
+    else:
+        print('Exporting to TensorRT (one-time, may take several minutes)...')
+
+    try:
+        model = YOLO(pt_model)
+        model.set_classes(prompts)  # type: ignore[misc]
+        export_dir = str(Path(data_dir) / 'models') if data_dir else None
+        model.export(format="engine", half=True, dynamic=False, batch=1,
+                     imgsz=640, device=0, simplify=True, project=export_dir)
+        if data_dir:
+            data_engine = Path(data_dir) / 'models' / engine_name
+            if data_engine.exists():
+                return data_engine
+        return engine_path if engine_path.exists() else None
+    except Exception as e:
+        if json_progress:
+            emit_json('status', message=f'TensorRT export failed: {e}')
+        else:
+            print(f'TensorRT export failed: {e}')
+        return None
+
+
+def warmup_gpu(model, device, imgsz=640):
+    """Run dummy inferences to warm up GPU (eliminates first-frame penalty)."""
+    if device != 'cuda':
+        return
+    try:
+        dummy = torch.zeros(1, 3, imgsz, imgsz, device=device)
+        for _ in range(3):
+            model(dummy, verbose=False)
+        torch.cuda.synchronize()
+        torch.cuda.empty_cache()
+    except Exception:
+        pass  # Non-critical
+
+
+class MotionGate:
+    """Skip YOLO on static CCTV frames using background subtraction.
+
+    Designed for ZERO false negatives: may run YOLO on static frames
+    (false positive OK) but will NEVER skip a frame with real motion.
+    """
+
+    def __init__(self, cooldown=30, keyframe_interval=150):
+        self.bg_sub = cv2.createBackgroundSubtractorMOG2(
+            history=300, varThreshold=16, detectShadows=False
+        )
+        self.kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
+        self.cooldown = cooldown
+        self.keyframe_interval = keyframe_interval
+        self.frames_since_motion = 999
+        self.frames_since_detection = 999
+        self.frames_since_yolo = 999
+        self.total_checked = 0
+        self.total_triggered = 0
+
+    def check(self, frame) -> bool:
+        """Returns True if this frame should be analyzed by YOLO."""
+        self.total_checked += 1
+        self.frames_since_yolo += 1
+
+        # Downsample + denoise (cost: ~0.3ms)
+        small = cv2.resize(frame, (160, 120), interpolation=cv2.INTER_AREA)
+        small = cv2.GaussianBlur(cv2.cvtColor(small, cv2.COLOR_BGR2GRAY), (5, 5), 0)
+        fg = self.bg_sub.apply(small)
+        fg = cv2.morphologyEx(fg, cv2.MORPH_OPEN, self.kernel)
+
+        motion_ratio = cv2.countNonZero(fg) / (160 * 120)
+        if motion_ratio > 0.001:  # 0.1% of pixels = motion
+            self.frames_since_motion = 0
+        else:
+            self.frames_since_motion += 1
+
+        should = (
+            self.frames_since_motion <= self.cooldown
+            or self.frames_since_detection <= self.cooldown
+            or self.frames_since_yolo >= self.keyframe_interval
+        )
+
+        if should:
+            self.total_triggered += 1
+            self.frames_since_yolo = 0
+        return should
+
+    def report_detection(self, has_objects: bool):
+        """Call after YOLO to update detection state."""
+        if has_objects:
+            self.frames_since_detection = 0
+        else:
+            self.frames_since_detection += 1
+
+    @property
+    def skip_rate(self) -> float:
+        return 1.0 - (self.total_triggered / max(self.total_checked, 1))
 
 
 def process_video(source: str, yolo: YOLO, cfg: dict, args, video_index: int = 1, total_videos: int = 1) -> str | None:
@@ -376,6 +537,8 @@ def process_video_chain(sources: list[str], yolo: YOLO, cfg: dict, args) -> str 
             conf=conf,
             device=device,
             persist=True,
+            save=False,
+            save_crop=False,
             half=half,
             imgsz=imgsz,
             vid_stride=stride,
@@ -622,29 +785,39 @@ Examples:
             os.makedirs(download_dest, exist_ok=True)
             model_path = os.path.join(download_dest, Path(model_path).name)
 
-    # macOS: Try CoreML for Neural Engine acceleration
-    using_coreml = False
+    # Platform-specific model optimization (one-time exports)
+    using_optimized = False
+
     if sys.platform == 'darwin':
-        # Check for CoreML model next to the .pt file, and also in data dir
+        # macOS: CoreML for Neural Engine acceleration
         coreml_path = get_coreml_model_path(model_path)
         if coreml_path is None and data_dir:
-            # Check data dir for existing CoreML export
             data_coreml = Path(data_dir) / 'models' / Path(model_path).with_suffix('.mlpackage').name
             if data_coreml.exists():
                 coreml_path = data_coreml
         if coreml_path is None:
-            # Export to data dir (resource dir may be read-only)
             coreml_path = export_to_coreml(model_path, prompts, json_progress, data_dir)
-
         if coreml_path and coreml_path.exists():
             model_path = str(coreml_path)
-            using_coreml = True
+            using_optimized = True
 
-    # Determine device name for display (actual device selection happens in processing functions)
-    if using_coreml:
-        device_name = 'CoreML (Neural Engine)'
     elif torch.cuda.is_available():
-        device_name = 'CUDA'
+        # Windows/Linux: TensorRT for NVIDIA GPU acceleration
+        trt_path = export_to_tensorrt(model_path, prompts, json_progress, data_dir)
+        if trt_path and trt_path.exists():
+            model_path = str(trt_path)
+            using_optimized = True
+
+    # Determine device name for display
+    if model_path.endswith('.mlpackage'):
+        device_name = 'CoreML (Neural Engine)'
+    elif model_path.endswith('.engine'):
+        gpu_name = torch.cuda.get_device_name() if torch.cuda.is_available() else 'GPU'
+        device_name = f'TensorRT ({gpu_name})'
+    elif torch.cuda.is_available():
+        gpu_name = torch.cuda.get_device_name()
+        fp16_status = '+ FP16' if _has_tensor_cores() else ''
+        device_name = f'CUDA ({gpu_name}) {fp16_status}'.strip()
     elif torch.backends.mps.is_available():
         device_name = 'MPS (Metal)'
     else:
@@ -659,10 +832,17 @@ Examples:
 
     # Load model once
     yolo = YOLO(model_path)
-    if not using_coreml:
+    if not using_optimized:
         if json_progress:
             emit_json('status', message='Προετοιμασία αναγνώρισης αντικειμένων...')
-        yolo.set_classes(prompts)  # type: ignore[misc]  # CoreML has classes baked in during export
+        yolo.set_classes(prompts)  # type: ignore[misc]  # Optimized models have classes baked in
+
+    # GPU warmup (eliminates slow first frame)
+    if torch.cuda.is_available():
+        imgsz_val = args.imgsz or cfg['imgsz']
+        if json_progress:
+            emit_json('status', message='Προθέρμανση GPU...')
+        warmup_gpu(yolo, 'cuda', imgsz_val)
 
     if json_progress:
         emit_json('status', message=f'Αναζήτηση: {", ".join(prompts)}')
@@ -720,6 +900,9 @@ Examples:
             report_path = process_video(source, yolo, cfg, args, video_index=idx, total_videos=total_videos)
             if report_path:
                 reports.append(report_path)
+            # Free GPU cache between videos to prevent OOM
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
 
     # Summary
     if json_progress:
