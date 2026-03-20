@@ -66,6 +66,15 @@ function dismissUpdate() {
   updateInfo.value = null;
   updateError.value = "";
 }
+
+async function openLog() {
+  try {
+    const logPath = await invoke<string>("get_log_path");
+    await invoke("open_file", { path: logPath });
+  } catch (e) {
+    console.error("Failed to open log:", e);
+  }
+}
 </script>
 
 <template>
@@ -140,6 +149,9 @@ function dismissUpdate() {
           :disabled="checkingUpdate"
         >
           {{ checkingUpdate ? 'Έλεγχος...' : 'Έλεγχος ενημερώσεων' }}
+        </button>
+        <button class="update-check-btn" @click="openLog">
+          Αρχείο Log
         </button>
       </div>
 
