@@ -460,10 +460,7 @@ pub async fn run_setup(
         ("regex", "regex"),
         ("lap", "lap"),
     ];
-    // Add TensorRT for NVIDIA GPUs (massive inference speedup)
-    if use_cuda {
-        required_packages.push(("tensorrt", "tensorrt-cu12"));
-    }
+    // TensorRT: handled separately below (needs two sub-packages)
     let pkg_dir_opt = if use_target { Some(packages_dir.as_path()) } else { None };
     let target_str = packages_dir.to_string_lossy().to_string();
 
@@ -490,6 +487,50 @@ pub async fn run_setup(
         logger.info("Packages installed successfully");
     } else {
         logger.info("All packages already installed");
+    }
+
+    // TensorRT for NVIDIA: install sub-packages + create wrapper module
+    // (tensorrt-cu12 meta-package has no wheels, only sdist requiring build tools)
+    if use_cuda && !check_python_module(&python_exe, "tensorrt", pkg_dir_opt, logger) {
+        logger.info("Installing TensorRT for GPU acceleration");
+        let mut trt_args: Vec<&str> = vec!["-m", "pip", "install"];
+        if use_target {
+            trt_args.push("--target");
+            trt_args.push(&target_str);
+        }
+        trt_args.push("tensorrt-cu12-bindings");
+        trt_args.push("tensorrt-cu12-libs");
+
+        match run_command(
+            &python_exe,
+            &trt_args,
+            if use_target { Some(("PYTHONPATH", packages_dir.to_str().unwrap())) } else { None },
+            logger,
+        ) {
+            Ok(_) => {
+                // Create tensorrt wrapper module (the meta-package normally provides this)
+                // tensorrt-cu12-bindings installs as "tensorrt_bindings", we need "tensorrt"
+                let trt_dir = packages_dir.join("tensorrt");
+                if !trt_dir.exists() {
+                    if let Err(e) = std::fs::create_dir_all(&trt_dir) {
+                        logger.info(&format!("Failed to create tensorrt wrapper dir: {}", e));
+                    } else {
+                        let init_content = "from tensorrt_bindings import *\n";
+                        if let Err(e) = std::fs::write(trt_dir.join("__init__.py"), init_content) {
+                            logger.info(&format!("Failed to write tensorrt __init__.py: {}", e));
+                        } else {
+                            logger.info("TensorRT installed successfully (with wrapper module)");
+                        }
+                    }
+                } else {
+                    logger.info("TensorRT installed successfully");
+                }
+            }
+            Err(e) => {
+                // TensorRT is optional — log but don't fail setup
+                logger.info(&format!("TensorRT install failed (optional, will use PyTorch): {}", e));
+            }
+        }
     }
 
     // CLIP: check separately (zip dependency)

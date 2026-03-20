@@ -236,6 +236,7 @@ async fn process_videos(
         .command(&python_str);
     cmd = cmd.env("PYTHONUNBUFFERED", "1");
     cmd = cmd.env("PYTHONUTF8", "1");
+    cmd = cmd.env("PYTHONIOENCODING", "utf-8");
     cmd = cmd.env("PYTHONPATH", &python_path);
     let (mut rx, child) = cmd
         .args(&args)

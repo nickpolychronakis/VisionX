@@ -706,7 +706,7 @@ def _parallel_worker(worker_args: dict) -> str | None:
     source = worker_args['source']
     model_path = worker_args['model_path']
     prompts = worker_args['prompts']
-    using_coreml = worker_args['using_coreml']
+    using_optimized = worker_args['using_optimized']
     cfg = worker_args['cfg']
     args = worker_args['args']
     video_index = worker_args['video_index']
@@ -714,7 +714,7 @@ def _parallel_worker(worker_args: dict) -> str | None:
 
     # Each worker loads its own model instance
     yolo = YOLO(model_path)
-    if not using_coreml:
+    if not using_optimized:
         yolo.set_classes(prompts)  # type: ignore[misc]
 
     return process_video(source, yolo, cfg, args, video_index=video_index, total_videos=total_videos)
@@ -950,7 +950,7 @@ Examples:
                 'source': source,
                 'model_path': model_path,
                 'prompts': prompts,
-                'using_coreml': using_coreml,
+                'using_optimized': using_optimized,
                 'cfg': cfg,
                 'args': args,
                 'video_index': idx,
