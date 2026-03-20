@@ -489,15 +489,17 @@ pub async fn run_setup(
         logger.info("All packages already installed");
     }
 
-    // TensorRT for NVIDIA: install sub-packages + create wrapper module
-    // (tensorrt-cu12 meta-package has no wheels, only sdist requiring build tools)
+    // TensorRT for NVIDIA: install sub-packages from NVIDIA index + create wrapper module
+    // tensorrt-cu12-libs wheels are ONLY on NVIDIA's PyPI, not standard PyPI
     if use_cuda && !check_python_module(&python_exe, "tensorrt", pkg_dir_opt, logger) {
-        logger.info("Installing TensorRT for GPU acceleration");
-        let mut trt_args: Vec<&str> = vec!["-m", "pip", "install"];
+        logger.info("Installing TensorRT for GPU acceleration (~2GB download)");
+        let mut trt_args: Vec<&str> = vec!["-m", "pip", "install", "--only-binary", ":all:"];
         if use_target {
             trt_args.push("--target");
             trt_args.push(&target_str);
         }
+        trt_args.push("--extra-index-url");
+        trt_args.push("https://pypi.nvidia.com");
         trt_args.push("tensorrt-cu12-bindings");
         trt_args.push("tensorrt-cu12-libs");
 
