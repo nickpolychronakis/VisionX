@@ -1,6 +1,9 @@
-ultralytics
-pyyaml
-tqdm
-ftfy
-regex
+torch>=2.10.0
+torchvision>=0.25.0
+ultralytics>=8.4.24
+pyyaml>=6.0
+tqdm>=4.67
+ftfy>=6.3
+regex>=2024.0
+lap>=0.5
 clip @ https://github.com/openai/CLIP/archive/refs/heads/main.zip

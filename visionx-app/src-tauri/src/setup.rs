@@ -392,7 +392,7 @@ pub async fn run_setup(
     let use_target = python_source == "embedded"; // system Python: install globally; embedded: use --target
 
     // === Step 2: Install PyTorch ===
-    if !check_python_module(&python_exe, "torch", if use_target { Some(&packages_dir) } else { None }, logger) {
+    if !check_python_module(&python_exe, "torch", Some("2.10.0"), if use_target { Some(&packages_dir) } else { None }, logger) {
         let index_url = if use_cuda {
             logger.info("Installing PyTorch with CUDA 12.4 support");
             TORCH_CUDA_INDEX
@@ -418,7 +418,7 @@ pub async fn run_setup(
         );
 
         let mut pip_args = vec![
-            "-m", "pip", "install", "--index-url", index_url, "torch", "torchvision",
+            "-m", "pip", "install", "--index-url", index_url, "torch>=2.10.0", "torchvision>=0.25.0",
         ];
         let target_str = packages_dir.to_string_lossy().to_string();
         if use_target {
@@ -451,22 +451,22 @@ pub async fn run_setup(
         },
     );
 
-    // Check each required module and collect missing ones
-    let mut required_packages = vec![
-        ("ultralytics", "ultralytics"),
-        ("yaml", "pyyaml"),
-        ("tqdm", "tqdm"),
-        ("ftfy", "ftfy"),
-        ("regex", "regex"),
-        ("lap", "lap"),
+    // Check each required module: (import_name, pip_package, min_version)
+    let required_packages: Vec<(&str, &str, Option<&str>)> = vec![
+        ("ultralytics", "ultralytics>=8.4.24", Some("8.4.24")),
+        ("yaml", "pyyaml>=6.0", Some("6.0")),
+        ("tqdm", "tqdm>=4.67", Some("4.67")),
+        ("ftfy", "ftfy>=6.3", Some("6.3")),
+        ("regex", "regex>=2024.0", None),  // regex.__version__ format varies
+        ("lap", "lap>=0.5", Some("0.5")),
     ];
     // TensorRT: handled separately below (needs two sub-packages)
     let pkg_dir_opt = if use_target { Some(packages_dir.as_path()) } else { None };
     let target_str = packages_dir.to_string_lossy().to_string();
 
     let missing: Vec<&str> = required_packages.iter()
-        .filter(|(module, _)| !check_python_module(&python_exe, module, pkg_dir_opt, logger))
-        .map(|(_, pkg)| *pkg)
+        .filter(|(module, _, min_ver)| !check_python_module(&python_exe, module, *min_ver, pkg_dir_opt, logger))
+        .map(|(_, pkg, _)| *pkg)
         .collect();
 
     if !missing.is_empty() {
@@ -491,7 +491,7 @@ pub async fn run_setup(
 
     // TensorRT for NVIDIA: install sub-packages from NVIDIA index + create wrapper module
     // tensorrt-cu12-libs wheels are ONLY on NVIDIA's PyPI, not standard PyPI
-    if use_cuda && !check_python_module(&python_exe, "tensorrt", pkg_dir_opt, logger) {
+    if use_cuda && !check_python_module(&python_exe, "tensorrt", None, pkg_dir_opt, logger) {
         logger.info("Installing TensorRT for GPU acceleration (~2GB download)");
         let _ = app.emit(
             "setup-progress",
@@ -547,7 +547,7 @@ pub async fn run_setup(
     }
 
     // CLIP: check separately (zip dependency)
-    if !check_python_module(&python_exe, "clip", pkg_dir_opt, logger) {
+    if !check_python_module(&python_exe, "clip", None, pkg_dir_opt, logger) {
         logger.info("Installing OpenAI CLIP");
         let mut clip_args: Vec<&str> = vec![
             "-m", "pip", "install",
@@ -753,15 +753,29 @@ async fn find_or_download_python(
     Ok((python_exe, "embedded"))
 }
 
-/// Check if a Python module is importable
-fn check_python_module(python: &Path, module: &str, packages_dir: Option<&Path>, logger: &Logger) -> bool {
+/// Check if a Python module is importable and optionally meets minimum version
+fn check_python_module(python: &Path, module: &str, min_version: Option<&str>, packages_dir: Option<&Path>, logger: &Logger) -> bool {
+    // First check if module can be imported
+    let check_script = match min_version {
+        Some(ver) => format!(
+            "import {m}; v=getattr({m},'__version__','0'); parts=lambda s:[int(x) for x in s.split('.')[:3]]; exit(0 if parts(v)>=parts('{ver}') else 1)",
+            m = module, ver = ver
+        ),
+        None => format!("import {}", module),
+    };
+
     let mut cmd = Command::new(python);
-    cmd.args(["-c", &format!("import {}", module)]);
+    cmd.args(["-c", &check_script]);
+    cmd.env("PYTHONUTF8", "1");
     if let Some(pkg_dir) = packages_dir {
         cmd.env("PYTHONPATH", pkg_dir);
     }
     let result = cmd.output().map(|o| o.status.success()).unwrap_or(false);
-    logger.info(&format!("Module check '{}': {}", module, if result { "found" } else { "missing" }));
+
+    match min_version {
+        Some(ver) => logger.info(&format!("Module check '{}' (>= {}): {}", module, ver, if result { "ok" } else { "needs update" })),
+        None => logger.info(&format!("Module check '{}': {}", module, if result { "found" } else { "missing" })),
+    }
     result
 }
 
@@ -895,7 +909,7 @@ mod tests {
         let (_dir, logger) = test_logger();
         let python = find_system_python(&logger).expect("Need system Python for this test");
         // 'json' is a stdlib module, should always exist
-        assert!(check_python_module(&python, "json", None, &logger));
+        assert!(check_python_module(&python, "json", None, None, &logger));
     }
 
     #[test]
@@ -903,7 +917,7 @@ mod tests {
         let (_dir, logger) = test_logger();
         let python = find_system_python(&logger).expect("Need system Python for this test");
         // This module should never exist
-        assert!(!check_python_module(&python, "nonexistent_module_xyz_123", None, &logger));
+        assert!(!check_python_module(&python, "nonexistent_module_xyz_123", None, None, &logger));
     }
 
     #[test]
