@@ -3,7 +3,6 @@ import { ref, computed } from "vue";
 
 interface Settings {
   confidence: number;
-  stride: number;
   imgsz: number;
   outputDir: string;
   searchPrompts: string[];
@@ -91,31 +90,6 @@ function removePrompt(index: number) {
             <button @click="removePrompt(index)">×</button>
           </span>
         </div>
-      </div>
-
-      <!-- Stride -->
-      <div class="setting-row">
-        <label>
-          <span class="label-text">Παράλειψη Καρέ</span>
-          <span class="label-value">{{
-            settings.stride === 1
-              ? "Χωρίς παράλειψη"
-              : `1 στα ${settings.stride} καρέ`
-          }}</span>
-        </label>
-        <input
-          type="range"
-          v-model.number="settings.stride"
-          min="1"
-          max="10"
-          step="1"
-        />
-        <p class="setting-hint">
-          {{ settings.stride === 1
-            ? "Αναλύονται όλα τα καρέ — μέγιστη ακρίβεια, πιο αργά."
-            : `Αναλύεται 1 στα ${settings.stride} καρέ — ${settings.stride}x ταχύτερα, αλλά μπορεί να χαθούν στιγμιαίες κινήσεις.`
-          }}
-        </p>
       </div>
 
       <!-- Image Size -->

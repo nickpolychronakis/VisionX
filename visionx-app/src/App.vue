@@ -18,8 +18,7 @@ const selectedFiles = ref<string[]>([]);
 
 // Settings
 const settings = ref({
-  confidence: 0.50,
-  stride: 3,
+  confidence: 0.35,
   imgsz: 640,
   outputDir: "",
   searchPrompts: [] as string[],
@@ -161,7 +160,7 @@ async function startProcessing() {
       files: selectedFiles.value,
       config: {
         confidence: settings.value.confidence,
-        stride: settings.value.stride,
+        stride: 1,
         half_precision: false,
         imgsz: settings.value.imgsz,
         parallel: 1,

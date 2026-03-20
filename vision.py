@@ -24,15 +24,15 @@ from report import generate_report
 VID_FORMATS.add('dav')
 
 DEFAULT_CONFIG = {
-    'model': 'yoloe-26m-seg.pt',
+    'model': 'yoloe-26x-seg.pt',
     'prompts': ['car', 'person', 'motorcycle'],
-    'confidence': 0.5,
+    'confidence': 0.35,
     'save_video': False,
     'save_crops': False,
     'save_report': True,
-    'half': True,
+    'half': False,
     'imgsz': 640,
-    'vid_stride': 3,
+    'vid_stride': 1,
     'show': False,
 }
 
@@ -215,77 +215,15 @@ def export_to_tensorrt(pt_model: str, prompts: list[str], json_progress: bool = 
 
 
 def warmup_gpu(model, device, imgsz=640):
-    """Run dummy inferences to warm up GPU (eliminates first-frame penalty)."""
+    """Warm up GPU using ultralytics built-in warmup (eliminates first-frame penalty)."""
     if device != 'cuda':
         return
     try:
-        dummy = torch.zeros(1, 3, imgsz, imgsz, device=device)
-        for _ in range(3):
-            model(dummy, verbose=False)
+        model.warmup(imgsz=(1, 3, imgsz, imgsz))
         torch.cuda.synchronize()
         torch.cuda.empty_cache()
     except Exception:
         pass  # Non-critical
-
-
-class MotionGate:
-    """Skip YOLO on static CCTV frames using background subtraction.
-
-    Designed for ZERO false negatives: may run YOLO on static frames
-    (false positive OK) but will NEVER skip a frame with real motion.
-    """
-
-    def __init__(self, cooldown=30, keyframe_interval=150):
-        self.bg_sub = cv2.createBackgroundSubtractorMOG2(
-            history=300, varThreshold=16, detectShadows=False
-        )
-        self.kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
-        self.cooldown = cooldown
-        self.keyframe_interval = keyframe_interval
-        self.frames_since_motion = 999
-        self.frames_since_detection = 999
-        self.frames_since_yolo = 999
-        self.total_checked = 0
-        self.total_triggered = 0
-
-    def check(self, frame) -> bool:
-        """Returns True if this frame should be analyzed by YOLO."""
-        self.total_checked += 1
-        self.frames_since_yolo += 1
-
-        # Downsample + denoise (cost: ~0.3ms)
-        small = cv2.resize(frame, (160, 120), interpolation=cv2.INTER_AREA)
-        small = cv2.GaussianBlur(cv2.cvtColor(small, cv2.COLOR_BGR2GRAY), (5, 5), 0)
-        fg = self.bg_sub.apply(small)
-        fg = cv2.morphologyEx(fg, cv2.MORPH_OPEN, self.kernel)
-
-        motion_ratio = cv2.countNonZero(fg) / (160 * 120)
-        if motion_ratio > 0.001:  # 0.1% of pixels = motion
-            self.frames_since_motion = 0
-        else:
-            self.frames_since_motion += 1
-
-        should = (
-            self.frames_since_motion <= self.cooldown
-            or self.frames_since_detection <= self.cooldown
-            or self.frames_since_yolo >= self.keyframe_interval
-        )
-
-        if should:
-            self.total_triggered += 1
-            self.frames_since_yolo = 0
-        return should
-
-    def report_detection(self, has_objects: bool):
-        """Call after YOLO to update detection state."""
-        if has_objects:
-            self.frames_since_detection = 0
-        else:
-            self.frames_since_detection += 1
-
-    @property
-    def skip_rate(self) -> float:
-        return 1.0 - (self.total_triggered / max(self.total_checked, 1))
 
 
 def process_video(source: str, yolo: YOLO, cfg: dict, args, video_index: int = 1, total_videos: int = 1) -> str | None:
@@ -362,6 +300,7 @@ def process_video(source: str, yolo: YOLO, cfg: dict, args, video_index: int = 1
         stream=True,
         verbose=False,
         tracker=tracker_path,
+        max_det=300,
     )
 
     # Track detections for report (with embedded thumbnails)
@@ -438,10 +377,12 @@ def process_video(source: str, yolo: YOLO, cfg: dict, args, video_index: int = 1
                         'thumbnail': thumb_crop,
                         'first_pos': existing.get('first_pos', (cx, cy)),
                         'last_pos': (cx, cy),
+                        'frame_count': existing.get('frame_count', 0) + 1,
                     }
                 else:
-                    # Always update last_seen and position
+                    # Always update last_seen, position, and frame count
                     tracks[track_id]['last_seen'] = timestamp
+                    tracks[track_id]['frame_count'] = tracks[track_id].get('frame_count', 0) + 1
                     x1, y1, x2, y2 = map(int, box.tolist())
                     tracks[track_id]['last_pos'] = ((x1 + x2) / 2, (y1 + y2) / 2)
 
@@ -580,6 +521,7 @@ def process_video_chain(sources: list[str], yolo: YOLO, cfg: dict, args) -> str 
             stream=True,
             verbose=False,
             tracker=tracker_path,
+            max_det=300,
         )
 
         frame_in_video = 0
@@ -649,11 +591,13 @@ def process_video_chain(sources: list[str], yolo: YOLO, cfg: dict, args) -> str 
                             'thumbnail': thumb_crop,
                             'first_pos': existing.get('first_pos', (cx, cy)),
                             'last_pos': (cx, cy),
+                            'frame_count': existing.get('frame_count', 0) + 1,
                         }
                     else:
-                        # Update last_seen and position
+                        # Update last_seen, position, and frame count
                         tracks[track_id]['last_seen'] = local_timestamp
                         tracks[track_id]['last_seen_file'] = source_name
+                        tracks[track_id]['frame_count'] = tracks[track_id].get('frame_count', 0) + 1
                         x1, y1, x2, y2 = map(int, box.tolist())
                         tracks[track_id]['last_pos'] = ((x1 + x2) / 2, (y1 + y2) / 2)
 

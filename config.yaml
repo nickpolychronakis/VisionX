@@ -7,11 +7,11 @@ prompts:
   - person
   - motorcycle
 
-confidence: 0.65
+confidence: 0.35
 save_video: false
 save_crops: false
 save_report: true
-half: true
+half: false
 imgsz: 640
-vid_stride: 3
+vid_stride: 1
 show: false
