@@ -317,8 +317,12 @@ def process_video(source: str, yolo: YOLO, cfg: dict, args, video_index: int = 1
         results_iter = tqdm(results, total=total_processed, desc='  Analyzing', unit='frame')
 
     processing_start = _time.monotonic()
-    for result in results_iter:
+    frames_since_cache_clear = 0
+
+    try:
+      for result in results_iter:
         frame_num += 1
+        frames_since_cache_clear += 1
 
         # Emit progress for GUI (every 0.5s for responsive updates)
         if json_progress:
@@ -385,6 +389,26 @@ def process_video(source: str, yolo: YOLO, cfg: dict, args, video_index: int = 1
                     tracks[track_id]['frame_count'] = tracks[track_id].get('frame_count', 0) + 1
                     x1, y1, x2, y2 = map(int, box.tolist())
                     tracks[track_id]['last_pos'] = ((x1 + x2) / 2, (y1 + y2) / 2)
+
+        # Periodic VRAM cleanup (reduces fragmentation on NVIDIA)
+        if device == 'cuda' and frames_since_cache_clear >= 30:
+            try:
+                torch.cuda.empty_cache()
+                frames_since_cache_clear = 0
+            except Exception:
+                pass
+
+    except RuntimeError as e:
+        if 'out of memory' in str(e).lower():
+            log_stderr(f'GPU out of memory at frame {frame_num}/{total_processed} — generating report with partial data')
+            if json_progress:
+                emit_json('status', message=f'GPU memory full at frame {frame_num} — report will contain partial data')
+            try:
+                torch.cuda.empty_cache()
+            except Exception:
+                pass
+        else:
+            raise
 
     # Post-process tracks: encode thumbnails, calc dwell time & direction
     for track_id, track in tracks.items():

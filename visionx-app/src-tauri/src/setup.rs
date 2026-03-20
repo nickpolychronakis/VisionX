@@ -10,7 +10,7 @@ const PYTHON_ZIP_URL: &str = "https://www.python.org/ftp/python/3.13.2/python-3.
 const GET_PIP_URL: &str = "https://bootstrap.pypa.io/get-pip.py";
 const MODEL_URL: &str = "https://github.com/ultralytics/assets/releases/download/v8.4.0/yoloe-26x-seg.pt";
 const TORCH_CPU_INDEX: &str = "https://download.pytorch.org/whl/cpu";
-const TORCH_CUDA_INDEX: &str = "https://download.pytorch.org/whl/cu124";
+const TORCH_CUDA_INDEX: &str = "https://download.pytorch.org/whl/cu126";
 
 #[derive(Clone, Serialize)]
 pub struct SetupProgress {
@@ -138,11 +138,33 @@ pub fn check_setup(data_dir: &Path, current_version: &str) -> SetupStatus {
     }
 }
 
+/// Find nvidia-smi executable (may not be in PATH on some Windows systems)
+fn find_nvidia_smi() -> String {
+    // Try PATH first (covers C:\Windows\System32 on modern drivers)
+    if let Ok(output) = Command::new("nvidia-smi").arg("--version").output() {
+        if output.status.success() {
+            return "nvidia-smi".to_string();
+        }
+    }
+    // Fallback: legacy NVIDIA install path
+    #[cfg(target_os = "windows")]
+    {
+        let legacy = r"C:\Program Files\NVIDIA Corporation\NVSMI\nvidia-smi.exe";
+        if std::path::Path::new(legacy).exists() {
+            return legacy.to_string();
+        }
+    }
+    "nvidia-smi".to_string() // Last resort — will fail gracefully
+}
+
 /// Detect NVIDIA GPU using nvidia-smi
 pub fn detect_gpu(logger: &Logger) -> GpuInfo {
     logger.info("Detecting GPU...");
 
-    let result = Command::new("nvidia-smi")
+    let nvidia_smi = find_nvidia_smi();
+    logger.info(&format!("Using nvidia-smi: {}", nvidia_smi));
+
+    let result = Command::new(&nvidia_smi)
         .args(["--query-gpu=name,driver_version", "--format=csv,noheader"])
         .output();
 
@@ -394,7 +416,7 @@ pub async fn run_setup(
     // === Step 2: Install PyTorch ===
     if !check_python_module(&python_exe, "torch", Some("2.10.0"), if use_target { Some(&packages_dir) } else { None }, logger) {
         let index_url = if use_cuda {
-            logger.info("Installing PyTorch with CUDA 12.4 support");
+            logger.info("Installing PyTorch with CUDA 12.6 support");
             TORCH_CUDA_INDEX
         } else {
             logger.info("Installing PyTorch CPU-only");
@@ -406,7 +428,7 @@ pub async fn run_setup(
             SetupProgress {
                 step: "pytorch".to_string(),
                 step_label: if use_cuda {
-                    "PyTorch (CUDA 12.4)".to_string()
+                    "PyTorch (CUDA 12.6)".to_string()
                 } else {
                     "PyTorch (CPU)".to_string()
                 },
@@ -647,7 +669,7 @@ pub async fn run_setup(
         packages_ready: true,
         gpu_detected: use_cuda,
         torch_variant: if use_cuda {
-            "cu124".to_string()
+            "cu126".to_string()
         } else {
             "cpu".to_string()
         },
