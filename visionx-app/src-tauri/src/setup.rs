@@ -11,6 +11,12 @@ const GET_PIP_URL: &str = "https://bootstrap.pypa.io/get-pip.py";
 const MODEL_URL: &str = "https://github.com/ultralytics/assets/releases/download/v8.4.0/yoloe-26x-seg.pt";
 const TORCH_CPU_INDEX: &str = "https://download.pytorch.org/whl/cpu";
 const TORCH_CUDA_INDEX: &str = "https://download.pytorch.org/whl/cu126";
+// PyTorch 2.9+ requires MSVC++ v14 Redistributable 14.50+ (newer than what many Windows
+// machines have). Without it, c10.dll fails with WinError 1114 "DLL initialization routine
+// failed" because the DLL was compiled against the newer MSVC toolset. This URL always
+// points to the latest x64 redistributable from Microsoft.
+#[cfg(target_os = "windows")]
+const VCREDIST_URL: &str = "https://aka.ms/vs/17/release/vc_redist.x64.exe";
 
 #[derive(Clone, Serialize)]
 pub struct SetupProgress {
@@ -202,6 +208,90 @@ pub fn detect_gpu(logger: &Logger) -> GpuInfo {
     }
 }
 
+/// Ensure the latest MSVC++ Redistributable is installed on Windows.
+/// PyTorch 2.9+ requires MSVC++ v14.50+ — without it, c10.dll (and other torch DLLs)
+/// fail with WinError 1114 "DLL initialization routine failed" because they were compiled
+/// against the newer Visual C++ toolset. An older vcruntime140.dll loads fine but can't
+/// satisfy the newer initialization requirements, causing silent DllMain failures.
+/// This downloads vc_redist.x64.exe from Microsoft and runs it silently.
+#[cfg(target_os = "windows")]
+async fn ensure_vcredist(
+    app: &AppHandle,
+    data_dir: &Path,
+    logger: &Logger,
+    step_index: u32,
+    total_steps: u32,
+) -> Result<(), String> {
+    // Check if we already installed it (avoid re-downloading every time)
+    let marker = data_dir.join(".vcredist_installed");
+    if marker.exists() {
+        logger.info("MSVC++ Redistributable already ensured, skipping");
+        return Ok(());
+    }
+
+    logger.info("Ensuring latest MSVC++ Redistributable is installed (required by PyTorch 2.9+)");
+
+    let _ = app.emit(
+        "setup-progress",
+        SetupProgress {
+            step: "vcredist".to_string(),
+            step_label: "Visual C++ Runtime".to_string(),
+            downloaded: 0,
+            total: 0,
+            step_index,
+            total_steps,
+        },
+    );
+
+    // Download vc_redist.x64.exe to a temp location
+    let vcredist_exe = data_dir.join("vc_redist.x64.exe");
+    download_file(
+        VCREDIST_URL,
+        &vcredist_exe,
+        app,
+        logger,
+        "vcredist",
+        "Visual C++ Runtime",
+        step_index,
+        total_steps,
+    )
+    .await?;
+
+    // Run the installer silently — /install /quiet /norestart are the standard
+    // Microsoft-documented flags for unattended MSVC++ Redistributable installation.
+    // This is safe to run even if the same or newer version is already installed;
+    // the installer will detect it and exit quickly with success.
+    logger.info("Installing MSVC++ Redistributable silently...");
+    let output = Command::new(&vcredist_exe)
+        .args(["/install", "/quiet", "/norestart"])
+        .output()
+        .map_err(|e| format!("Failed to run vc_redist installer: {}", e))?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+        // Exit code 1638 means "a newer version is already installed" — that's fine
+        let exit_code = output.status.code().unwrap_or(-1);
+        if exit_code == 1638 {
+            logger.info("MSVC++ Redistributable: newer version already installed (exit 1638)");
+        } else {
+            logger.info(&format!(
+                "MSVC++ Redistributable installer returned exit code {} (stderr: {}). Continuing anyway — it may already be installed.",
+                exit_code, stderr.trim()
+            ));
+        }
+    } else {
+        logger.info("MSVC++ Redistributable installed successfully");
+    }
+
+    // Write marker so we don't re-download on every setup run
+    let _ = std::fs::write(&marker, "installed");
+
+    // Clean up the installer exe to save disk space (~25 MB)
+    let _ = std::fs::remove_file(&vcredist_exe);
+
+    Ok(())
+}
+
 /// Download a file with progress events
 async fn download_file(
     url: &str,
@@ -363,6 +453,20 @@ fn run_command(
 
     if let Some((key, val)) = env {
         cmd.env(key, val);
+
+        // On Windows with embedded Python (PYTHONPATH set), prepend torch/lib to PATH
+        // so that c10.dll and other PyTorch DLLs can find their dependencies. PyTorch's
+        // internal _load_dll_libraries() uses os.add_dll_directory() but also falls back
+        // to PATH; with --target installs, sys.exec_prefix-based paths are wrong, so
+        // this ensures Windows DLL loader always finds the torch libs.
+        #[cfg(target_os = "windows")]
+        if key == "PYTHONPATH" {
+            let torch_lib = Path::new(val).join("torch").join("lib");
+            if torch_lib.exists() {
+                let current_path = std::env::var("PATH").unwrap_or_default();
+                cmd.env("PATH", format!("{};{}", torch_lib.to_string_lossy(), current_path));
+            }
+        }
     }
 
     let output = cmd.output().map_err(|e| {
@@ -398,7 +502,12 @@ pub async fn run_setup(
     use_cuda: bool,
     logger: &Logger,
 ) -> Result<(), String> {
+    // On Windows we have an extra step (MSVC++ Redistributable) before PyTorch
+    #[cfg(target_os = "windows")]
+    let total_steps: u32 = 6;
+    #[cfg(not(target_os = "windows"))]
     let total_steps: u32 = 5;
+
     let packages_dir = data_dir.join("packages");
     let models_dir = data_dir.join("models");
     let scripts_dir = data_dir.join("scripts");
@@ -413,7 +522,20 @@ pub async fn run_setup(
     let python_str = python_exe.to_string_lossy().to_string();
     let use_target = python_source == "embedded"; // system Python: install globally; embedded: use --target
 
-    // === Step 2: Install PyTorch ===
+    // === Windows-only: Ensure MSVC++ Redistributable is installed ===
+    // PyTorch 2.9+ requires MSVC++ v14.50+ (vcruntime140.dll compiled with newer toolset).
+    // Without it, c10.dll loads but DllMain fails with WinError 1114. This must happen
+    // BEFORE PyTorch is installed/imported so the runtime DLLs are available.
+    #[cfg(target_os = "windows")]
+    ensure_vcredist(app, data_dir, logger, 2, total_steps).await?;
+
+    // Step index offset: on Windows steps shift by 1 because of the MSVC step
+    #[cfg(target_os = "windows")]
+    let step_offset: u32 = 1;
+    #[cfg(not(target_os = "windows"))]
+    let step_offset: u32 = 0;
+
+    // === Step 2 (3 on Windows): Install PyTorch ===
     if !check_python_module(&python_exe, "torch", Some("2.10.0"), if use_target { Some(&packages_dir) } else { None }, logger) {
         let index_url = if use_cuda {
             logger.info("Installing PyTorch with CUDA 12.6 support");
@@ -434,7 +556,7 @@ pub async fn run_setup(
                 },
                 downloaded: 0,
                 total: 0,
-                step_index: 2,
+                step_index: 2 + step_offset,
                 total_steps,
             },
         );
@@ -460,7 +582,7 @@ pub async fn run_setup(
         logger.info("PyTorch already installed, skipping");
     }
 
-    // === Step 3: Install other dependencies ===
+    // === Step 3 (4 on Windows): Install other dependencies ===
     let _ = app.emit(
         "setup-progress",
         SetupProgress {
@@ -468,7 +590,7 @@ pub async fn run_setup(
             step_label: "AI Libraries".to_string(),
             downloaded: 0,
             total: 0,
-            step_index: 3,
+            step_index: 3 + step_offset,
             total_steps,
         },
     );
@@ -522,7 +644,7 @@ pub async fn run_setup(
                 step_label: "TensorRT GPU Acceleration (~2GB)".to_string(),
                 downloaded: 0,
                 total: 0,
-                step_index: 3,
+                step_index: 3 + step_offset,
                 total_steps,
             },
         );
@@ -598,7 +720,7 @@ pub async fn run_setup(
             logger,
             "model",
             "AI Model (yoloe-26x-seg)",
-            4,
+            4 + step_offset,
             total_steps,
         )
         .await?;
@@ -619,7 +741,7 @@ pub async fn run_setup(
         logger.info("Model already downloaded, skipping");
     }
 
-    // === Step 5: Copy scripts from resources ===
+    // === Step 5 (6 on Windows): Copy scripts from resources ===
     let _ = app.emit(
         "setup-progress",
         SetupProgress {
@@ -627,7 +749,7 @@ pub async fn run_setup(
             step_label: "Finalizing...".to_string(),
             downloaded: 0,
             total: 0,
-            step_index: 5,
+            step_index: 5 + step_offset,
             total_steps,
         },
     );
@@ -791,6 +913,19 @@ fn check_python_module(python: &Path, module: &str, min_version: Option<&str>, p
     cmd.env("PYTHONUTF8", "1");
     if let Some(pkg_dir) = packages_dir {
         cmd.env("PYTHONPATH", pkg_dir);
+
+        // On Windows with --target installs, prepend torch/lib to PATH so that
+        // importing torch can find c10.dll and its dependencies via the DLL loader.
+        // Without this, check_python_module("torch", ...) would fail with WinError 1114
+        // even though the MSVC++ Redistributable is installed.
+        #[cfg(target_os = "windows")]
+        {
+            let torch_lib = pkg_dir.join("torch").join("lib");
+            if torch_lib.exists() {
+                let current_path = std::env::var("PATH").unwrap_or_default();
+                cmd.env("PATH", format!("{};{}", torch_lib.to_string_lossy(), current_path));
+            }
+        }
     }
     let result = cmd.output().map(|o| o.status.success()).unwrap_or(false);
 

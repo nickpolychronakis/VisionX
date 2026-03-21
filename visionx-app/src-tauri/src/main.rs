@@ -238,6 +238,23 @@ async fn process_videos(
     cmd = cmd.env("PYTHONUTF8", "1");
     cmd = cmd.env("PYTHONIOENCODING", "utf-8");
     cmd = cmd.env("PYTHONPATH", &python_path);
+
+    // On Windows, prepend torch/lib to PATH so Windows DLL loader can find c10.dll and
+    // its CUDA dependencies. PyTorch's _load_dll_libraries() uses os.add_dll_directory()
+    // for this, but with embedded Python + pip --target installs, the PATH fallback in
+    // _load_dll_libraries() may compute wrong paths (it uses sys.exec_prefix which points
+    // to the embed dir, not the packages dir). This ensures the DLLs are always findable.
+    #[cfg(target_os = "windows")]
+    {
+        let torch_lib_dir = packages_dir.join("torch").join("lib");
+        if torch_lib_dir.exists() {
+            let current_path = std::env::var("PATH").unwrap_or_default();
+            let new_path = format!("{};{}", torch_lib_dir.to_string_lossy(), current_path);
+            cmd = cmd.env("PATH", &new_path);
+            logger.info(&format!("Added torch/lib to PATH: {}", torch_lib_dir.display()));
+        }
+    }
+
     let (mut rx, child) = cmd
         .args(&args)
         .spawn()

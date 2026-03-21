@@ -1,6 +1,6 @@
 [package]
 name = "visionx-app"
-version = "0.6.1"
+version = "0.6.2"
 description = "VisionX - Video Object Detection & Tracking"
 authors = ["VisionX"]
 license = ""

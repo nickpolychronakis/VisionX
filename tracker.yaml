@@ -5,7 +5,9 @@ tracker_type: botsort
 track_high_thresh: 0.25       # First-stage detection confidence (permissive for CCTV)
 track_low_thresh: 0.1         # Second-stage (ByteTrack two-stage matching)
 new_track_thresh: 0.30        # Min confidence to create new track (raised to reduce false tracks)
-track_buffer: 300             # 10 sec at 30fps — keeps lost tracks alive
+track_buffer: 300             # 10 sec at 30fps — keeps lost tracks alive for brief occlusions
+                              # 300 is optimal: long enough for walking behind a pole,
+                              # short enough that a person gone >10sec gets a new ID (correct behavior)
 match_thresh: 0.7             # IoU cost threshold (lower = stricter matching)
 fuse_score: true              # Fuse detection confidence into matching cost
 gmc_method: none              # No camera motion compensation (fixed cameras)
