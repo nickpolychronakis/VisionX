@@ -173,44 +173,60 @@ def export_to_tensorrt(pt_model: str, prompts: list[str], json_progress: bool = 
         return None
 
     try:
-        import tensorrt  # noqa: F401
+        import tensorrt as trt  # noqa: F401
+        log_stderr(f'TensorRT version: {trt.__version__}')
     except ImportError:
-        return None  # TensorRT not installed, fall back to PyTorch CUDA
+        log_stderr('TensorRT not installed, skipping optimization')
+        return None
+    except Exception as e:
+        # Wrapper module exists but bindings broken
+        log_stderr(f'TensorRT import failed: {e}')
+        return None
 
     engine_name = Path(pt_model).with_suffix('.engine').name
 
-    # Check data dir first
+    # Check data dir first (writable location for bundled apps)
     if data_dir:
         data_engine = Path(data_dir) / 'models' / engine_name
         if data_engine.exists():
+            log_stderr(f'Using existing TensorRT engine: {data_engine}')
             return data_engine
 
-    # Check next to .pt
+    # Check next to .pt file
     engine_path = Path(pt_model).with_suffix('.engine')
     if engine_path.exists():
+        log_stderr(f'Using existing TensorRT engine: {engine_path}')
         return engine_path
 
+    # Export .engine (one-time, 5-15 minutes depending on GPU)
+    log_stderr('Exporting to TensorRT (one-time, may take several minutes)...')
     if json_progress:
         emit_json('status', message='Βελτιστοποίηση για GPU (μόνο την πρώτη φορά, μπορεί να πάρει μερικά λεπτά)...')
-    else:
-        print('Exporting to TensorRT (one-time, may take several minutes)...')
 
     try:
         model = YOLO(pt_model)
-        model.set_classes(prompts)  # type: ignore[misc]
+        model.set_classes(prompts)  # type: ignore[misc]  # Bake class embeddings into engine
         export_dir = str(Path(data_dir) / 'models') if data_dir else None
+        log_stderr(f'TensorRT export: imgsz=640, half=True, device=0, output={export_dir or "same dir"}')
         model.export(format="engine", half=True, dynamic=False, batch=1,
                      imgsz=640, device=0, simplify=True, project=export_dir)
+
+        # Verify the export created a file
         if data_dir:
             data_engine = Path(data_dir) / 'models' / engine_name
             if data_engine.exists():
+                log_stderr(f'TensorRT export successful: {data_engine} ({data_engine.stat().st_size // 1024 // 1024}MB)')
                 return data_engine
-        return engine_path if engine_path.exists() else None
+        if engine_path.exists():
+            log_stderr(f'TensorRT export successful: {engine_path}')
+            return engine_path
+
+        log_stderr('TensorRT export completed but .engine file not found')
+        return None
     except Exception as e:
+        log_stderr(f'TensorRT export failed: {e}')
         if json_progress:
-            emit_json('status', message=f'TensorRT export failed: {e}')
-        else:
-            print(f'TensorRT export failed: {e}')
+            emit_json('status', message=f'TensorRT export αποτυχία: {e}. Χρήση PyTorch CUDA.')
         return None
 
 

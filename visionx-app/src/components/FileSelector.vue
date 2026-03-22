@@ -22,7 +22,7 @@ onMounted(async () => {
       const paths = event.payload.paths;
       if (paths && paths.length > 0) {
         // Filter for video files
-        const videoExtensions = ['mp4', 'avi', 'mov', 'mkv', 'wmv', 'flv', 'webm', 'm4v', 'mpeg', 'mpg', '3gp', 'ts', 'mts'];
+        const videoExtensions = ['mp4', 'avi', 'mov', 'mkv', 'wmv', 'flv', 'webm', 'm4v', 'mpeg', 'mpg', '3gp', 'ts', 'mts', 'bin', 'dav'];
         const videoFiles = paths.filter(p => {
           const ext = p.split('.').pop()?.toLowerCase();
           return ext && videoExtensions.includes(ext);
@@ -50,7 +50,7 @@ async function selectFiles() {
       filters: [
         {
           name: "Video",
-          extensions: ["mp4", "avi", "mov", "mkv", "wmv", "flv", "webm", "m4v", "mpeg", "mpg", "3gp", "ts", "mts"],
+          extensions: ["mp4", "avi", "mov", "mkv", "wmv", "flv", "webm", "m4v", "mpeg", "mpg", "3gp", "ts", "mts", "bin", "dav"],
         },
       ],
     });
