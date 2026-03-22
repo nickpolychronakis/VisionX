@@ -672,7 +672,15 @@ pub async fn run_setup(
                     if let Err(e) = std::fs::create_dir_all(&trt_dir) {
                         logger.info(&format!("Failed to create tensorrt wrapper dir: {}", e));
                     } else {
-                        let init_content = "from tensorrt_bindings import *\n";
+                        // Wildcard import skips dunder attrs like __version__,
+                        // so we import it explicitly for version detection
+                        let init_content = concat!(
+                            "from tensorrt_bindings import *\n",
+                            "try:\n",
+                            "    from tensorrt_bindings import __version__\n",
+                            "except ImportError:\n",
+                            "    __version__ = 'unknown'\n",
+                        );
                         if let Err(e) = std::fs::write(trt_dir.join("__init__.py"), init_content) {
                             logger.info(&format!("Failed to write tensorrt __init__.py: {}", e));
                         } else {
@@ -902,7 +910,9 @@ fn check_python_module(python: &Path, module: &str, min_version: Option<&str>, p
     // First check if module can be imported
     let check_script = match min_version {
         Some(ver) => format!(
-            "import {m}; v=getattr({m},'__version__','0'); parts=lambda s:[int(x) for x in s.split('.')[:3]]; exit(0 if parts(v)>=parts('{ver}') else 1)",
+            // Strip +cu126/+cpu suffixes before version comparison
+            // (torch.__version__ returns "2.10.0+cu126" which breaks int() on "0+cu126")
+            "import {m}; v=getattr({m},'__version__','0').split('+')[0]; parts=lambda s:[int(x) for x in s.split('.')[:3]]; exit(0 if parts(v)>=parts('{ver}') else 1)",
             m = module, ver = ver
         ),
         None => format!("import {}", module),

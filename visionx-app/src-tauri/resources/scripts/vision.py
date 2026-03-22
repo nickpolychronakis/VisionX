@@ -290,7 +290,10 @@ def process_video(source: str, yolo: YOLO, cfg: dict, args, video_index: int = 1
     cap.release()
 
     if total_frames == 0:
-        print(f'  Skipping: Could not read video')
+        # Video file may be corrupt, empty, or in unsupported format
+        log_stderr(f'Skipping {source_path.name}: could not read video (0 frames detected)')
+        if json_progress:
+            emit_json('status', message=f'Παράβλεψη {source_path.name}: δεν μπόρεσε να αναγνωριστεί')
         return None
 
     # Output directory for YOLO (only if saving video/crops)
