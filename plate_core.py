@@ -89,6 +89,7 @@ class PlateReader:
         # are predominantly Greek. Foreign plates remain visible in
         # 'candidates' (free list) right below.
         best = gr[0] if gr else free[0]
+        plate_px = max(img.shape[1] for img, _ in plates)
         return {
             'plate': best['plate'],
             'score': best['score'],
@@ -96,4 +97,11 @@ class PlateReader:
             'gr_candidates': gr,
             'det_conf': round(max(w for _, w in plates), 3),
             'frames_used': len(plates),
+            'plate_px': plate_px,
+            # Reliability flag for the UI. Ground-truth field case: a 4-crop
+            # dusk read voted 95% for a plate KNOWN to be wrong — when every
+            # crop carries the same blur, consensus is confidently mistaken.
+            # Below ~60px width or under 3 voting frames the read must be
+            # presented as uncertain, alternatives up front.
+            'low_conf': plate_px < 60 or len(plates) < 3 or best['score'] < 0.5,
         }

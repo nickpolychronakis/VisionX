@@ -77,13 +77,25 @@ def generate_report(tracks: dict, output_dir: str, video_name: str, video_path: 
                              for c in (p.get('candidates') or [])[:3])
             tip = html_mod.escape(
                 f"Candidates (for DB search, not evidentiary): {alts}"
-                f" — from {p.get('frames_used', 0)} frames. Click to copy.",
+                f" — from {p.get('frames_used', 0)} frames, "
+                f"plate ~{p.get('plate_px', '?')}px wide. Click to copy.",
                 quote=True)
             plate_txt = html_mod.escape(p['plate'], quote=True)
-            plate_html = (f'<div class="platechip" title="{tip}" '
+            # The percentage is VOTE CONSENSUS, not correctness probability —
+            # a tiny blurred plate can vote unanimously for a wrong read
+            # (verified against a known ground-truth plate). Low-reliability
+            # reads render in warning style with a ≈ prefix and alternatives
+            # spelled out right below, not hidden in a tooltip.
+            unreliable = p.get('low_conf')
+            chip_cls = 'platechip uncertain' if unreliable else 'platechip'
+            prefix = '&asymp; ' if unreliable else ''
+            plate_html = (f'<div class="{chip_cls}" title="{tip}" '
                           f'onclick="copyTimestamp(\'{plate_txt}\')">'
-                          f'\U0001F698 {plate_txt} '
-                          f'<span class="pscore">{p["score"]:.0%}</span></div>')
+                          f'\U0001F698 {prefix}{plate_txt} '
+                          f'<span class="pscore">{p["score"]:.0%} consensus</span></div>')
+            if unreliable and alts:
+                plate_html += (f'<div class="plate-alts">uncertain read — '
+                               f'alternatives: {html_mod.escape(alts)}</div>')
             if p.get('deep_cmd'):
                 cmd = html_mod.escape(p['deep_cmd'], quote=True)
                 plate_html += (f'<span class="deepchip" title="Copy the deep '
@@ -240,6 +252,12 @@ def generate_report(tracks: dict, output_dir: str, video_name: str, video_path: 
             margin: 4px 0; cursor: copy; font-size: 1.0em;
         }}
         .platechip:hover {{ background: #ffd75e; }}
+        .platechip.uncertain {{
+            background: #2a2118; color: #fbbf24;
+            border: 2px dashed #b45309;
+        }}
+        .platechip.uncertain:hover {{ background: #3a2d1a; }}
+        .plate-alts {{ color: #fbbf24; font-size: 0.78em; margin: 0 0 4px; }}
         .pscore {{ font-size: 0.75em; color: #555; letter-spacing: 0; }}
         .deepchip {{
             cursor: copy; margin-left: 6px; color: #7dd3fc; font-size: 1.1em;
