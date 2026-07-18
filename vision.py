@@ -19,6 +19,8 @@ from tqdm import tqdm
 from ultralytics import YOLO  # type: ignore[attr-defined]
 from ultralytics.data.utils import IMG_FORMATS, VID_FORMATS
 from report import generate_report
+from tracking import TrackCollector, prepare_for_report
+import stitch as stitch_mod
 
 # Add .dav (Dahua DVR format) support - OpenCV can read these
 VID_FORMATS.add('dav')
@@ -34,7 +36,62 @@ DEFAULT_CONFIG = {
     'imgsz': 640,
     'vid_stride': 1,
     'show': False,
+    # Offline tracklet stitching (ROADMAP Phase A): repair fragmented tracks
+    # after processing so the same object is ONE report entry. Threshold from
+    # real-footage calibration (see stitch.py); raise it if wrong merges ever
+    # appear. embed model is a dedicated nano checkpoint — the main model may
+    # be a CoreML/TensorRT export that cannot produce embeddings.
+    'stitch': True,
+    'stitch_threshold': 0.88,
+    'stitch_embed_model': 'yoloe-26n-seg.pt',
+    'snapshots': 4,
 }
+
+
+def resolve_model_path(name: str, data_dir=None, resource_dir=None) -> str:
+    """Resolve a model filename via the app's storage convention (data-dir
+    models/, bundled resource models/, CWD, script dir). If nothing exists,
+    return a data-dir path so ultralytics auto-downloads THERE instead of
+    polluting the current working directory."""
+    p = Path(name)
+    if p.is_absolute() and p.exists():
+        return str(p)
+    for base in [data_dir, resource_dir]:
+        if base:
+            cand = Path(base) / 'models' / p.name
+            if cand.exists():
+                return str(cand)
+    for base in [Path.cwd(), Path(__file__).parent]:
+        cand = Path(base) / p.name
+        if cand.exists():
+            return str(cand)
+    if data_dir:
+        dest = Path(data_dir) / 'models'
+        dest.mkdir(parents=True, exist_ok=True)
+        return str(dest / p.name)
+    return name
+
+
+def run_stitching(tracks: dict, cfg: dict, json_progress: bool) -> dict:
+    """Offline tracklet-stitching pass shared by single and chain modes.
+    Any failure degrades to the unstitched tracks — a report must always
+    come out."""
+    if not cfg.get('stitch', True) or len(tracks) < 2:
+        return tracks
+    if json_progress:
+        emit_json('status', message='Συγχώνευση διαδρομών (stitching)...')
+    try:
+        embed_path = resolve_model_path(cfg.get('stitch_embed_model',
+                                                'yoloe-26n-seg.pt'),
+                                        cfg.get('_data_dir'),
+                                        cfg.get('_resource_dir'))
+        stitch_mod.compute_embeddings(tracks, embed_path, log=log_stderr)
+        return stitch_mod.stitch_tracks(
+            tracks, sim_threshold=float(cfg.get('stitch_threshold', 0.88)),
+            log=log_stderr)
+    except Exception as e:  # noqa: BLE001
+        log_stderr(f'Stitching failed ({e}) — using raw tracks')
+        return tracks
 
 
 def load_config(config_path: str = 'config.yaml') -> dict:
@@ -322,8 +379,9 @@ def process_video(source: str, yolo: YOLO, cfg: dict, args, video_index: int = 1
         max_det=300,
     )
 
-    # Track detections for report (with embedded thumbnails)
-    tracks = {}  # track_id -> detection info + thumbnail
+    # Track detections for report — shared collector (best-K snapshots +
+    # position stats for the stitching pass), see tracking.py.
+    collector = TrackCollector(max_snapshots=int(cfg.get('snapshots', 4)))
     frame_num = 0
     total_processed = total_frames // stride
     last_progress_time = 0.0
@@ -372,42 +430,9 @@ def process_video(source: str, yolo: YOLO, cfg: dict, args, video_index: int = 1
                 track_id = int(result.boxes.id[i])
 
                 timestamp = (frame_num * stride) / fps
-
-                # Update or create track entry (keep best confidence)
-                if track_id not in tracks or det_conf > tracks[track_id]['confidence']:
-                    # Extract raw thumbnail crop with 30% padding (encode later)
-                    x1, y1, x2, y2 = map(int, box.tolist())
-                    h, w = result.orig_img.shape[:2]
-                    box_w, box_h = x2 - x1, y2 - y1
-                    pad_x, pad_y = int(box_w * 0.3), int(box_h * 0.3)
-                    x1, y1 = max(0, x1 - pad_x), max(0, y1 - pad_y)
-                    x2, y2 = min(w, x2 + pad_x), min(h, y2 + pad_y)
-
-                    thumb_crop = None
-                    if x2 > x1 and y2 > y1:
-                        thumb_crop = result.orig_img[y1:y2, x1:x2].copy()
-
-                    # Calculate bbox center for direction tracking
-                    cx = (x1 + x2) / 2
-                    cy = (y1 + y2) / 2
-
-                    existing = tracks.get(track_id, {})
-                    tracks[track_id] = {
-                        'class': class_name,
-                        'confidence': det_conf,
-                        'first_seen': existing.get('first_seen', timestamp),
-                        'last_seen': timestamp,
-                        'thumbnail': thumb_crop,
-                        'first_pos': existing.get('first_pos', (cx, cy)),
-                        'last_pos': (cx, cy),
-                        'frame_count': existing.get('frame_count', 0) + 1,
-                    }
-                else:
-                    # Always update last_seen, position, and frame count
-                    tracks[track_id]['last_seen'] = timestamp
-                    tracks[track_id]['frame_count'] = tracks[track_id].get('frame_count', 0) + 1
-                    x1, y1, x2, y2 = map(int, box.tolist())
-                    tracks[track_id]['last_pos'] = ((x1 + x2) / 2, (y1 + y2) / 2)
+                collector.add(track_id=track_id, class_name=class_name,
+                              conf=det_conf, box_xyxy=box.tolist(),
+                              frame_img=result.orig_img, timestamp=timestamp)
 
         # Periodic VRAM cleanup (reduces fragmentation on NVIDIA)
         if device == 'cuda' and frames_since_cache_clear >= 30:
@@ -429,31 +454,15 @@ def process_video(source: str, yolo: YOLO, cfg: dict, args, video_index: int = 1
         else:
             raise
 
-    # Post-process tracks: encode thumbnails, calc dwell time & direction
-    for track_id, track in tracks.items():
-        if track['thumbnail'] is not None:
-            _, buffer = cv2.imencode('.jpg', track['thumbnail'], [cv2.IMWRITE_JPEG_QUALITY, 85])
-            track['thumbnail'] = base64.b64encode(buffer).decode('utf-8')
+    # Post-process: derived fields, then the offline stitching pass merges
+    # fragmented tracklets of the same physical object (ROADMAP Phase A).
+    tracks = collector.finalize()
+    n_raw = len(tracks)
+    tracks = run_stitching(tracks, cfg, json_progress)
+    tracks = prepare_for_report(tracks)
 
-        # Dwell time
-        track['dwell_time'] = track['last_seen'] - track['first_seen']
-
-        # Direction arrow (8 directions + stationary)
-        first = track.get('first_pos', (0, 0))
-        last = track.get('last_pos', (0, 0))
-        dx = last[0] - first[0]
-        dy = last[1] - first[1]
-        min_movement = 30  # pixels — ignore tiny movements
-        if abs(dx) < min_movement and abs(dy) < min_movement:
-            track['direction'] = '●'  # stationary
-        else:
-            import math
-            angle = math.degrees(math.atan2(-dy, dx))  # -dy because y grows downward
-            arrows = ['→', '↗', '↑', '↖', '←', '↙', '↓', '↘']
-            idx = round(angle / 45) % 8
-            track['direction'] = arrows[idx]
-
-    log_stderr(f'Processing complete: {source_path.name} — {len(tracks)} tracks, {frame_num} frames analyzed')
+    log_stderr(f'Processing complete: {source_path.name} — {n_raw} tracklets '
+               f'-> {len(tracks)} objects, {frame_num} frames analyzed')
 
     # Generate HTML report
     report_path = None
@@ -527,8 +536,8 @@ def process_video_chain(sources: list[str], yolo: YOLO, cfg: dict, args) -> str 
         print(f'\nChain mode: Processing {len(sources)} videos as continuous sequence')
         print(f'Total frames: {total_all_frames}')
 
-    # Track detections across all videos
-    tracks = {}
+    # Track detections across all videos — shared collector (see tracking.py)
+    collector = TrackCollector(max_snapshots=int(cfg.get('snapshots', 4)))
     global_frame_num = 0
     cumulative_time = 0.0
     last_progress_time = 0.0
@@ -605,44 +614,11 @@ def process_video_chain(sources: list[str], yolo: YOLO, cfg: dict, args) -> str 
 
                     # Local timestamp within this video
                     local_timestamp = (frame_in_video * stride) / fps
-
-                    # Update or create track entry
-                    if track_id not in tracks or det_conf > tracks[track_id]['confidence']:
-                        # Extract raw thumbnail crop (encode later)
-                        x1, y1, x2, y2 = map(int, box.tolist())
-                        h, w = result.orig_img.shape[:2]
-                        box_w, box_h = x2 - x1, y2 - y1
-                        pad_x, pad_y = int(box_w * 0.3), int(box_h * 0.3)
-                        x1, y1 = max(0, x1 - pad_x), max(0, y1 - pad_y)
-                        x2, y2 = min(w, x2 + pad_x), min(h, y2 + pad_y)
-
-                        thumb_crop = None
-                        if x2 > x1 and y2 > y1:
-                            thumb_crop = result.orig_img[y1:y2, x1:x2].copy()
-
-                        cx = (x1 + x2) / 2
-                        cy = (y1 + y2) / 2
-
-                        existing = tracks.get(track_id, {})
-                        tracks[track_id] = {
-                            'class': class_name,
-                            'confidence': det_conf,
-                            'first_seen': existing.get('first_seen', local_timestamp),
-                            'first_seen_file': existing.get('first_seen_file', source_name),
-                            'last_seen': local_timestamp,
-                            'last_seen_file': source_name,
-                            'thumbnail': thumb_crop,
-                            'first_pos': existing.get('first_pos', (cx, cy)),
-                            'last_pos': (cx, cy),
-                            'frame_count': existing.get('frame_count', 0) + 1,
-                        }
-                    else:
-                        # Update last_seen, position, and frame count
-                        tracks[track_id]['last_seen'] = local_timestamp
-                        tracks[track_id]['last_seen_file'] = source_name
-                        tracks[track_id]['frame_count'] = tracks[track_id].get('frame_count', 0) + 1
-                        x1, y1, x2, y2 = map(int, box.tolist())
-                        tracks[track_id]['last_pos'] = ((x1 + x2) / 2, (y1 + y2) / 2)
+                    collector.add(track_id=track_id, class_name=class_name,
+                                  conf=det_conf, box_xyxy=box.tolist(),
+                                  frame_img=result.orig_img,
+                                  timestamp=local_timestamp,
+                                  source_name=source_name)
 
         # Add this video's duration to cumulative time
         cumulative_time += info['frames'] / fps
@@ -650,27 +626,12 @@ def process_video_chain(sources: list[str], yolo: YOLO, cfg: dict, args) -> str 
     if not json_progress:
         pbar.close()
 
-    # Post-process tracks: encode thumbnails, calc dwell time & direction
-    import math
-    for track_id, track in tracks.items():
-        if track['thumbnail'] is not None:
-            _, buffer = cv2.imencode('.jpg', track['thumbnail'], [cv2.IMWRITE_JPEG_QUALITY, 85])
-            track['thumbnail'] = base64.b64encode(buffer).decode('utf-8')
-
-        track['dwell_time'] = track['last_seen'] - track['first_seen']
-
-        first = track.get('first_pos', (0, 0))
-        last = track.get('last_pos', (0, 0))
-        dx = last[0] - first[0]
-        dy = last[1] - first[1]
-        min_movement = 30
-        if abs(dx) < min_movement and abs(dy) < min_movement:
-            track['direction'] = '●'
-        else:
-            angle = math.degrees(math.atan2(-dy, dx))
-            arrows = ['→', '↗', '↑', '↖', '←', '↙', '↓', '↘']
-            idx = round(angle / 45) % 8
-            track['direction'] = arrows[idx]
+    # Post-process + offline stitching (shared with single-video mode).
+    tracks = collector.finalize()
+    n_raw = len(tracks)
+    tracks = run_stitching(tracks, cfg, json_progress)
+    tracks = prepare_for_report(tracks)
+    log_stderr(f'Chain complete: {n_raw} tracklets -> {len(tracks)} objects')
 
     # Generate combined report
     report_path = None
@@ -782,6 +743,10 @@ Examples:
 
     # Load config
     cfg = load_config(config_path)
+    # Stashed for downstream model resolution (stitching embed model) —
+    # processing functions receive cfg but not the arg dirs.
+    cfg['_data_dir'] = data_dir
+    cfg['_resource_dir'] = resource_dir
 
     # Collect video files
     video_files = []

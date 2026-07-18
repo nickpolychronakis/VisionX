@@ -37,7 +37,9 @@
       "resources/scripts/vision.py": "scripts/vision.py",
       "resources/scripts/report.py": "scripts/report.py",
       "resources/scripts/plate.py": "scripts/plate.py",
-      "resources/scripts/plate_report.py": "scripts/plate_report.py"
+      "resources/scripts/plate_report.py": "scripts/plate_report.py",
+      "resources/scripts/tracking.py": "scripts/tracking.py",
+      "resources/scripts/stitch.py": "scripts/stitch.py"
     },
     "icon": [
       "icons/32x32.png",

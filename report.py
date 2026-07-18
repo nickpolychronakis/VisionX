@@ -1,5 +1,6 @@
 """VisionX HTML Report Generator"""
 
+import html as html_mod
 from pathlib import Path
 
 
@@ -35,49 +36,75 @@ def generate_report(tracks: dict, output_dir: str, video_name: str, video_path: 
         # Direction arrow
         direction = track.get('direction', '●')
 
-        # Check if we have file info (chain mode)
-        first_file = track.get('first_seen_file')
-        last_file = track.get('last_seen_file')
+        # HTML-escape class names: they come from user --search prompts, so
+        # they must never be injected raw into markup/JS (Stage 0 bug fix).
+        cls_esc = html_mod.escape(track['class'], quote=True)
+        title_esc = html_mod.escape(track['class'].upper(), quote=True)
 
-        # Format timestamp display
-        if first_file:
-            first_display = f"{first_file} @ {first_ts}"
-            last_display = f"{last_file} @ {last_ts}"
-        else:
-            first_display = first_ts
-            last_display = last_ts
+        # Appearance intervals (post-stitching an object may have several:
+        # occlusions / re-entries). Fallback to first/last for old callers.
+        intervals = track.get('intervals') or [
+            {'start': track['first_seen'], 'end': track['last_seen'],
+             'file': track.get('first_seen_file')}]
+        interval_rows = []
+        for iv in intervals[:8]:
+            s_ts, e_ts = format_timestamp(iv['start']), format_timestamp(iv['end'])
+            file_prefix = f"{html_mod.escape(str(iv['file']))} @ " if iv.get('file') else ''
+            interval_rows.append(
+                f'<span class="ts" onclick="copyTimestamp(\'{s_ts}\')" '
+                f'title="Click to copy start timestamp">'
+                f'{file_prefix}{s_ts} &ndash; {e_ts}</span>')
+        if len(intervals) > 8:
+            interval_rows.append(f'<span class="ts-more">+{len(intervals) - 8} more intervals</span>')
 
-        # Use embedded base64 thumbnail
-        thumb_src = f"data:image/jpeg;base64,{track['thumbnail']}" if track.get('thumbnail') else ""
+        # Badges: parked/static objects and stitched (merged) identities.
+        badges = ''
+        if track.get('static'):
+            badges += '<span class="badge parked" title="Stationary for its whole presence">PARKED</span>'
+        merged_n = len(track.get('merged_from', []) or [])
+        if merged_n > 1:
+            badges += (f'<span class="badge merged" title="Automatically re-joined '
+                       f'from {merged_n} track fragments">×{merged_n} stitched</span>')
+
+        # Snapshot gallery: best-K crops, every one zoomable.
+        snaps = track.get('snapshots_b64') or ([track['thumbnail']] if track.get('thumbnail') else [])
+        snap_ts = track.get('snapshot_ts', [])
+        thumb_src = f"data:image/jpeg;base64,{snaps[0]}" if snaps else ""
+        minis = ''
+        if len(snaps) > 1:
+            for k, b64 in enumerate(snaps):
+                ts_label = format_timestamp(snap_ts[k]) if k < len(snap_ts) else ''
+                minis += (f'<img src="data:image/jpeg;base64,{b64}" class="mini" '
+                          f'onclick="openLightbox(this.src, \'{title_esc} #{track_id} @ {ts_label}\')" '
+                          f'title="{ts_label} — click to zoom">')
 
         card = f'''
-        <div class="card" data-class="{track['class']}">
-            <img src="{thumb_src}" alt="{track['class']} #{track_id}" class="thumbnail" onclick="openLightbox(this.src, '{track['class'].upper()} #{track_id}')" title="Click to zoom">
+        <div class="card" data-class="{cls_esc}">
+            <div class="thumbcol">
+                <img src="{thumb_src}" alt="{cls_esc} #{track_id}" class="thumbnail" onclick="openLightbox(this.src, '{title_esc} #{track_id}')" title="Click to zoom">
+                <div class="gallery">{minis}</div>
+            </div>
             <div class="info">
-                <div class="title">{track['class'].upper()} #{track_id}</div>
+                <div class="title">{title_esc} #{track_id} {badges}</div>
                 <div class="confidence">Confidence: {track['confidence']:.0%}</div>
                 <div class="meta">
                     <span class="direction" title="Direction">{direction}</span>
-                    <span class="dwell" title="Duration">{dwell_str}</span>
+                    <span class="dwell" title="Total visible duration">{dwell_str}</span>
                 </div>
                 <div class="timestamps">
-                    <span class="ts" onclick="copyTimestamp('{first_ts}')" title="Click to copy timestamp">
-                        First: {first_display}
-                    </span>
-                    <span class="ts" onclick="copyTimestamp('{last_ts}')" title="Click to copy timestamp">
-                        Last: {last_display}
-                    </span>
+                    {''.join(interval_rows)}
                 </div>
             </div>
         </div>'''
         cards_html.append(card)
 
-    # Get unique classes for filter buttons
+    # Get unique classes for filter buttons (escaped — user-supplied prompts)
     classes = sorted(set(t['class'] for t in tracks.values()))
     filter_buttons = '<button class="filter active" onclick="filterClass(\'all\')">All</button>\n'
     for cls in classes:
         count = sum(1 for t in tracks.values() if t['class'] == cls)
-        filter_buttons += f'        <button class="filter" onclick="filterClass(\'{cls}\')">{cls.title()} ({count})</button>\n'
+        c = html_mod.escape(cls, quote=True)
+        filter_buttons += f'        <button class="filter" onclick="filterClass(\'{c}\')">{html_mod.escape(cls.title())} ({count})</button>\n'
 
     html = f'''<!DOCTYPE html>
 <html lang="en">
@@ -148,6 +175,7 @@ def generate_report(tracks: dict, output_dir: str, video_name: str, video_path: 
         }}
         .card:hover {{ transform: translateY(-2px); }}
         .card.hidden {{ display: none; }}
+        .thumbcol {{ display: flex; flex-direction: column; }}
         .thumbnail {{
             width: 120px;
             height: 120px;
@@ -156,6 +184,19 @@ def generate_report(tracks: dict, output_dir: str, video_name: str, video_path: 
             transition: opacity 0.2s;
         }}
         .thumbnail:hover {{ opacity: 0.8; }}
+        .gallery {{ display: flex; flex-wrap: wrap; width: 120px; }}
+        .mini {{
+            width: 30px; height: 30px; object-fit: cover;
+            cursor: zoom-in; opacity: 0.85; transition: opacity 0.15s;
+        }}
+        .mini:hover {{ opacity: 1; }}
+        .badge {{
+            font-size: 0.6em; vertical-align: middle; border-radius: 4px;
+            padding: 2px 6px; margin-left: 6px; letter-spacing: 0.5px;
+        }}
+        .badge.parked {{ background: #0f3460; color: #7dd3fc; }}
+        .badge.merged {{ background: #14532d; color: #86efac; }}
+        .ts-more {{ color: #888; font-size: 0.85em; padding: 2px 10px; }}
         /* For persons, show top (face) instead of center */
         .card[data-class="person"] .thumbnail {{
             object-position: top;
@@ -352,9 +393,11 @@ def generate_report(tracks: dict, output_dir: str, video_name: str, video_path: 
 </body>
 </html>'''
 
-    # Save as video_report.html (same name as video)
+    # Save as video_report.html (same name as video).
+    # encoding='utf-8' is REQUIRED: on Windows the default is cp1252, which
+    # crashes on the direction arrows/Greek text (Stage 0 bug fix).
     report_file = output_path / f'{video_name}_report.html'
-    with open(report_file, 'w') as f:
+    with open(report_file, 'w', encoding='utf-8') as f:
         f.write(html)
 
     return str(report_file)
@@ -371,6 +414,6 @@ def generate_class_stats(tracks: dict) -> str:
         html += f'''
         <div class="stat">
             <div class="stat-value">{count}</div>
-            <div class="stat-label">{cls.title()}</div>
+            <div class="stat-label">{html_mod.escape(cls.title())}</div>
         </div>'''
     return html

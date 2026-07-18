@@ -812,7 +812,8 @@ pub async fn run_setup(
     // plate.py + plate_report.py bundled since v0.7.0: CLI-only for now (GUI
     // integration pending), but shipping them keeps scripts/ in sync with the
     // repo root; plate_report.py is imported by plate.py for the HTML report.
-    for script in ["vision.py", "report.py", "plate.py", "plate_report.py"] {
+    for script in ["vision.py", "report.py", "plate.py", "plate_report.py",
+                   "tracking.py", "stitch.py"] {
         let src = resource_dir.join("scripts").join(script);
         let dst = scripts_dir.join(script);
         if src.exists() {
