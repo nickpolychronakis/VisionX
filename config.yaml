@@ -24,3 +24,8 @@ stitch_threshold: 0.88
 stitch_embed_model: yoloe-26n-seg.pt
 # Best snapshots kept per object for the report gallery
 snapshots: 4
+
+# Automatic plate reading on vehicle tracks (candidates for DB search, shown
+# as a chip on each vehicle card; the interactive plate.py stays the
+# deep-analysis tool)
+plates: true

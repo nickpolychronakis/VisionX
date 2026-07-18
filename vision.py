@@ -12,6 +12,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import yaml
 import cv2
+import numpy as np
 import torch
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from pathlib import Path
@@ -45,7 +46,65 @@ DEFAULT_CONFIG = {
     'stitch_threshold': 0.88,
     'stitch_embed_model': 'yoloe-26n-seg.pt',
     'snapshots': 4,
+    # Automatic plate reading on every vehicle track (ROADMAP Phase B):
+    # detector + 3-model OCR ensemble vote over the track's best snapshots.
+    # Candidate-generation quality — the interactive plate.py remains the
+    # deep-analysis path (the report shows its ready-made command per car).
+    'plates': True,
 }
+
+# Which track classes count as vehicles for the auto-plate pass. Prompts are
+# free text (and may be Greek), so this is a keyword match, not a class list.
+VEHICLE_KEYWORDS = ('car', 'vehicle', 'truck', 'bus', 'van', 'motorc',
+                    'motorbike', 'moto', 'scooter', 'suv', 'taxi', 'lorry',
+                    'pickup', 'αυτοκίνητο', 'όχημα', 'μηχανή', 'μοτοσ',
+                    'φορτηγό', 'λεωφορείο', 'ταξί', 'βαν')
+
+
+def run_auto_plates(tracks: dict, cfg: dict, json_progress: bool,
+                    fps: float | None = None, video_path: str | None = None):
+    """Attach plate candidates to vehicle tracks (in place). Failures only
+    log — a report must always come out even if the ALPR stack is missing."""
+    if not cfg.get('plates', True):
+        return
+    vehicles = [t for t in tracks.values()
+                if any(k in t['class'].lower() for k in VEHICLE_KEYWORDS)
+                and t.get('snapshots')]
+    if not vehicles:
+        return
+    try:
+        from plate_core import PlateReader
+        reader = PlateReader()
+    except Exception as e:  # noqa: BLE001 — optional capability
+        log_stderr(f'Auto-ALPR unavailable ({e}) — skipping plate pass')
+        return
+    if json_progress:
+        emit_json('status', message=f'Ανάγνωση πινακίδων ({len(vehicles)} οχήματα)...')
+    found = 0
+    for t in vehicles:
+        try:
+            crops = [cv2.imdecode(np.frombuffer(s['jpeg'], np.uint8),
+                                  cv2.IMREAD_COLOR)
+                     for s in t.get('snapshots', [])]
+            res = reader.read_from_crops([c for c in crops if c is not None])
+        except Exception as e:  # noqa: BLE001
+            log_stderr(f'Plate read failed on a track ({e})')
+            continue
+        if not res:
+            continue
+        t['plate'] = res
+        found += 1
+        # Ready-made deep-analysis command: the interactive plate.py flow,
+        # pre-aimed at this vehicle's best snapshot (single-video mode only —
+        # chain snapshots only know their file's basename).
+        snap = t['snapshots'][0]
+        if fps and video_path and not snap.get('file'):
+            x1, y1, x2, y2 = snap['box']
+            frame_no = max(0, int(round(snap['ts'] * fps)) - 5)
+            res['deep_cmd'] = (f'python plate.py "{video_path}" '
+                               f'--roi {x1},{y1},{x2 - x1},{y2 - y1} '
+                               f'--start-frame {frame_no}')
+    log_stderr(f'Auto-ALPR: plates read on {found}/{len(vehicles)} vehicles')
 
 
 def resolve_model_path(name: str, data_dir=None, resource_dir=None) -> str:
@@ -459,6 +518,7 @@ def process_video(source: str, yolo: YOLO, cfg: dict, args, video_index: int = 1
     tracks = collector.finalize()
     n_raw = len(tracks)
     tracks = run_stitching(tracks, cfg, json_progress)
+    run_auto_plates(tracks, cfg, json_progress, fps=fps, video_path=source)
     tracks = prepare_for_report(tracks)
 
     log_stderr(f'Processing complete: {source_path.name} — {n_raw} tracklets '
@@ -630,6 +690,7 @@ def process_video_chain(sources: list[str], yolo: YOLO, cfg: dict, args) -> str 
     tracks = collector.finalize()
     n_raw = len(tracks)
     tracks = run_stitching(tracks, cfg, json_progress)
+    run_auto_plates(tracks, cfg, json_progress)
     tracks = prepare_for_report(tracks)
     log_stderr(f'Chain complete: {n_raw} tracklets -> {len(tracks)} objects')
 

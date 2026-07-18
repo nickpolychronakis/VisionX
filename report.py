@@ -66,6 +66,31 @@ def generate_report(tracks: dict, output_dir: str, video_name: str, video_path: 
             badges += (f'<span class="badge merged" title="Automatically re-joined '
                        f'from {merged_n} track fragments">×{merged_n} stitched</span>')
 
+        # Auto-read plate chip (vehicles): headline candidate + score; the
+        # tooltip carries the alternative candidates, a click copies the
+        # plate text, and the ⌕ chip copies a ready-made deep-analysis
+        # command for the interactive plate.py tool aimed at this vehicle.
+        plate_html = ''
+        p = track.get('plate')
+        if p:
+            alts = ', '.join(f"{c['plate']} ({c['score']:.0%})"
+                             for c in (p.get('candidates') or [])[:3])
+            tip = html_mod.escape(
+                f"Candidates (for DB search, not evidentiary): {alts}"
+                f" — from {p.get('frames_used', 0)} frames. Click to copy.",
+                quote=True)
+            plate_txt = html_mod.escape(p['plate'], quote=True)
+            plate_html = (f'<div class="platechip" title="{tip}" '
+                          f'onclick="copyTimestamp(\'{plate_txt}\')">'
+                          f'\U0001F698 {plate_txt} '
+                          f'<span class="pscore">{p["score"]:.0%}</span></div>')
+            if p.get('deep_cmd'):
+                cmd = html_mod.escape(p['deep_cmd'], quote=True)
+                plate_html += (f'<span class="deepchip" title="Copy the deep '
+                               f'plate-analysis command (interactive tool) '
+                               f'for this vehicle" '
+                               f'onclick="copyTimestamp(\'{cmd}\')">&#8981;</span>')
+
         # Snapshot gallery: best-K crops, every one zoomable.
         snaps = track.get('snapshots_b64') or ([track['thumbnail']] if track.get('thumbnail') else [])
         snap_ts = track.get('snapshot_ts', [])
@@ -86,6 +111,7 @@ def generate_report(tracks: dict, output_dir: str, video_name: str, video_path: 
             </div>
             <div class="info">
                 <div class="title">{title_esc} #{track_id} {badges}</div>
+                {plate_html}
                 <div class="confidence">Confidence: {track['confidence']:.0%}</div>
                 <div class="meta">
                     <span class="direction" title="Direction">{direction}</span>
@@ -197,6 +223,18 @@ def generate_report(tracks: dict, output_dir: str, video_name: str, video_path: 
         .badge.parked {{ background: #0f3460; color: #7dd3fc; }}
         .badge.merged {{ background: #14532d; color: #86efac; }}
         .ts-more {{ color: #888; font-size: 0.85em; padding: 2px 10px; }}
+        .platechip {{
+            display: inline-block; font-family: monospace; font-weight: bold;
+            letter-spacing: 2px; background: #f5f5f4; color: #1a1a2e;
+            border: 2px solid #64748b; border-radius: 5px; padding: 2px 10px;
+            margin: 4px 0; cursor: copy; font-size: 1.0em;
+        }}
+        .platechip:hover {{ background: #ffd75e; }}
+        .pscore {{ font-size: 0.75em; color: #555; letter-spacing: 0; }}
+        .deepchip {{
+            cursor: copy; margin-left: 6px; color: #7dd3fc; font-size: 1.1em;
+        }}
+        .deepchip:hover {{ color: #e94560; }}
         /* For persons, show top (face) instead of center */
         .card[data-class="person"] .thumbnail {{
             object-position: top;
