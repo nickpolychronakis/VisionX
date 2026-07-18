@@ -603,6 +603,13 @@ pub async fn run_setup(
         ("ftfy", "ftfy>=6.3", Some("6.3")),
         ("regex", "regex>=2024.0", None),  // regex.__version__ format varies
         ("lap", "lap>=0.5", Some("0.5")),
+        // plate.py (license plate reading): fast-alpr bundles the YOLOv9-t plate
+        // detector (open-image-models) + fast-plate-ocr OCR. Version check is None
+        // because fast_alpr does not expose a __version__ attribute (like clip).
+        ("fast_alpr", "fast-alpr>=0.4.0", None),
+        // onnxruntime is an OPTIONAL extra of fast-plate-ocr 1.x — without an
+        // explicit install the plate detector/OCR models cannot run at all.
+        ("onnxruntime", "onnxruntime>=1.27.0", Some("1.27.0")),
     ];
     // TensorRT: handled separately below (needs two sub-packages)
     let pkg_dir_opt = if use_target { Some(packages_dir.as_path()) } else { None };
@@ -718,6 +725,41 @@ pub async fn run_setup(
         )?;
     }
 
+    // opencv-contrib-python: plate.py needs the CSRT/KCF trackers, which exist
+    // ONLY in the contrib build. ultralytics depends on plain opencv-python and
+    // fast-plate-ocr on opencv-python-headless; all three ship the SAME `cv2`
+    // package directory, so whichever pip installs LAST silently overwrites the
+    // others. We therefore (re)install contrib after everything else with
+    // --force-reinstall --no-deps to guarantee the tracker-enabled build wins.
+    // Detection: cv2.TrackerCSRT_create only exists in the contrib build.
+    let csrt_ok = {
+        let mut cmd = Command::new(&python_exe);
+        cmd.args(["-c", "import cv2; cv2.TrackerCSRT_create"]);
+        cmd.env("PYTHONUTF8", "1");
+        if use_target {
+            cmd.env("PYTHONPATH", &target_str);
+        }
+        cmd.output().map(|o| o.status.success()).unwrap_or(false)
+    };
+    if !csrt_ok {
+        logger.info("Installing opencv-contrib-python (CSRT tracker for plate.py)");
+        let mut cv_args: Vec<&str> = vec![
+            "-m", "pip", "install", "--force-reinstall", "--no-deps",
+        ];
+        if use_target {
+            cv_args.push("--target");
+            cv_args.push(&target_str);
+        }
+        cv_args.push("opencv-contrib-python>=5.0");
+        run_command(
+            &python_exe,
+            &cv_args,
+            if use_target { Some(("PYTHONPATH", packages_dir.to_str().unwrap())) } else { None },
+            logger,
+        )?;
+        logger.info("opencv-contrib-python installed (cv2 clobber resolved)");
+    }
+
     // === Step 4: Download default model ===
     let model_path = models_dir.join("yoloe-26x-seg.pt");
     if !model_path.exists() {
@@ -767,7 +809,10 @@ pub async fn run_setup(
         .resource_dir()
         .map_err(|e| format!("Resource dir error: {}", e))?;
 
-    for script in ["vision.py", "report.py"] {
+    // plate.py + plate_report.py bundled since v0.7.0: CLI-only for now (GUI
+    // integration pending), but shipping them keeps scripts/ in sync with the
+    // repo root; plate_report.py is imported by plate.py for the HTML report.
+    for script in ["vision.py", "report.py", "plate.py", "plate_report.py"] {
         let src = resource_dir.join("scripts").join(script);
         let dst = scripts_dir.join(script);
         if src.exists() {
@@ -783,7 +828,9 @@ pub async fn run_setup(
         &python_exe,
         &[
             "-c",
-            "import torch; import ultralytics; print(f'torch={torch.__version__} cuda={torch.cuda.is_available()}')",
+            // cv2/csrt checks verify the opencv-contrib clobber fix actually held
+            // (a later pip run reinstalling plain opencv-python would break plate.py).
+            "import torch; import ultralytics; import cv2; import fast_plate_ocr; print(f'torch={torch.__version__} cuda={torch.cuda.is_available()} cv2={cv2.__version__} csrt={hasattr(cv2, \"TrackerCSRT_create\")}')",
         ],
         if use_target { Some(("PYTHONPATH", packages_dir.to_str().unwrap())) } else { None },
         logger,

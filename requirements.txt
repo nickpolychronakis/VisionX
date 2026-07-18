@@ -7,3 +7,19 @@ ftfy>=6.3
 regex>=2024.0
 lap>=0.5
 clip @ https://github.com/openai/CLIP/archive/refs/heads/main.zip
+
+# --- plate.py (multi-frame license plate reading) ---
+# fast-alpr bundles open-image-models (YOLOv9-t plate detector) + fast-plate-ocr
+# (plate-specialized OCR with per-character confidences). Chosen over Tesseract:
+# purpose-built for plates, runs on CPU via ONNX, confidences needed for voting.
+fast-alpr>=0.4.0
+# onnxruntime is an OPTIONAL extra of fast-plate-ocr 1.x — must be listed
+# explicitly here or the OCR/detector models cannot run at all.
+onnxruntime>=1.27.0
+# CSRT/KCF trackers used by plate.py exist ONLY in the contrib build.
+# WARNING: ultralytics pulls plain opencv-python and fast-plate-ocr pulls
+# opencv-python-headless; all three ship the SAME `cv2` directory and the one
+# pip installs last silently wins. After installing this file, force the
+# contrib build on top (see README):
+#   pip install --force-reinstall --no-deps "opencv-contrib-python>=5.0"
+opencv-contrib-python>=5.0
