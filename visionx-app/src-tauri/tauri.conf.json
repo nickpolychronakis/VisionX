@@ -40,7 +40,8 @@
       "resources/scripts/plate_report.py": "scripts/plate_report.py",
       "resources/scripts/tracking.py": "scripts/tracking.py",
       "resources/scripts/stitch.py": "scripts/stitch.py",
-      "resources/scripts/plate_core.py": "scripts/plate_core.py"
+      "resources/scripts/plate_core.py": "scripts/plate_core.py",
+      "resources/scripts/face_shots.py": "scripts/face_shots.py"
     },
     "icon": [
       "icons/32x32.png",

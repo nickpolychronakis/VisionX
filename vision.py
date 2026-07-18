@@ -51,6 +51,8 @@ DEFAULT_CONFIG = {
     # Candidate-generation quality — the interactive plate.py remains the
     # deep-analysis path (the report shows its ready-made command per car).
     'plates': True,
+    # Best face shots per person track — extraction ONLY, no recognition.
+    'faces': True,
 }
 
 # Which track classes count as vehicles for the auto-plate pass. Prompts are
@@ -59,6 +61,45 @@ VEHICLE_KEYWORDS = ('car', 'vehicle', 'truck', 'bus', 'van', 'motorc',
                     'motorbike', 'moto', 'scooter', 'suv', 'taxi', 'lorry',
                     'pickup', 'αυτοκίνητο', 'όχημα', 'μηχανή', 'μοτοσ',
                     'φορτηγό', 'λεωφορείο', 'ταξί', 'βαν')
+
+PERSON_KEYWORDS = ('person', 'pedestrian', 'people', 'man', 'woman', 'child',
+                   'άτομο', 'άνθρωπος', 'πεζός', 'άντρας', 'γυναίκα', 'παιδί')
+
+
+def run_face_shots(tracks: dict, cfg: dict, json_progress: bool):
+    """Attach the clearest face shots to person tracks (in place) —
+    EXTRACTION only, no recognition (ROADMAP Phase Γ). Any failure just
+    logs; the report always comes out."""
+    if not cfg.get('faces', True):
+        return
+    persons = [t for t in tracks.values()
+               if any(k in t['class'].lower() for k in PERSON_KEYWORDS)
+               and t.get('snapshots')]
+    if not persons:
+        return
+    try:
+        from face_shots import FaceExtractor
+        extractor = FaceExtractor(model_dir=cfg.get('_data_dir'))
+    except Exception as e:  # noqa: BLE001 — optional capability
+        log_stderr(f'Face extraction unavailable ({e}) — skipping')
+        return
+    if json_progress:
+        emit_json('status', message=f'Εξαγωγή προσώπων ({len(persons)} άτομα)...')
+    found = 0
+    for t in persons:
+        try:
+            crops = [cv2.imdecode(np.frombuffer(s['jpeg'], np.uint8),
+                                  cv2.IMREAD_COLOR)
+                     for s in t.get('snapshots', [])]
+            faces = extractor.best_faces([c for c in crops if c is not None])
+        except Exception as e:  # noqa: BLE001
+            log_stderr(f'Face extraction failed on a track ({e})')
+            continue
+        if faces:
+            t['faces'] = [{'b64': base64.b64encode(f['jpeg']).decode('utf-8'),
+                           'score': round(f['score'], 3)} for f in faces]
+            found += 1
+    log_stderr(f'Face shots: faces found on {found}/{len(persons)} persons')
 
 
 def run_auto_plates(tracks: dict, cfg: dict, json_progress: bool,
@@ -519,6 +560,7 @@ def process_video(source: str, yolo: YOLO, cfg: dict, args, video_index: int = 1
     n_raw = len(tracks)
     tracks = run_stitching(tracks, cfg, json_progress)
     run_auto_plates(tracks, cfg, json_progress, fps=fps, video_path=source)
+    run_face_shots(tracks, cfg, json_progress)
     tracks = prepare_for_report(tracks)
 
     log_stderr(f'Processing complete: {source_path.name} — {n_raw} tracklets '
@@ -691,6 +733,7 @@ def process_video_chain(sources: list[str], yolo: YOLO, cfg: dict, args) -> str 
     n_raw = len(tracks)
     tracks = run_stitching(tracks, cfg, json_progress)
     run_auto_plates(tracks, cfg, json_progress)
+    run_face_shots(tracks, cfg, json_progress)
     tracks = prepare_for_report(tracks)
     log_stderr(f'Chain complete: {n_raw} tracklets -> {len(tracks)} objects')
 

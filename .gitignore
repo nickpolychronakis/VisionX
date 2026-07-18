@@ -13,3 +13,4 @@ mobileclip2_b.ts
 dist/
 build/
 *.spec
+models/

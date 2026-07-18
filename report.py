@@ -91,6 +91,16 @@ def generate_report(tracks: dict, output_dir: str, video_name: str, video_path: 
                                f'for this vehicle" '
                                f'onclick="copyTimestamp(\'{cmd}\')">&#8981;</span>')
 
+        # Best face shots (person tracks): extraction only, for human review.
+        faces_html = ''
+        for k, face in enumerate(track.get('faces') or []):
+            faces_html += (f'<img src="data:image/jpeg;base64,{face["b64"]}" '
+                           f'class="face" title="Best face shot — click to zoom" '
+                           f'onclick="openLightbox(this.src, \'{title_esc} '
+                           f'#{track_id} — face {k + 1}\')">')
+        if faces_html:
+            faces_html = f'<div class="faces">{faces_html}</div>'
+
         # Snapshot gallery: best-K crops, every one zoomable.
         snaps = track.get('snapshots_b64') or ([track['thumbnail']] if track.get('thumbnail') else [])
         snap_ts = track.get('snapshot_ts', [])
@@ -111,7 +121,7 @@ def generate_report(tracks: dict, output_dir: str, video_name: str, video_path: 
             </div>
             <div class="info">
                 <div class="title">{title_esc} #{track_id} {badges}</div>
-                {plate_html}
+                {plate_html}{faces_html}
                 <div class="confidence">Confidence: {track['confidence']:.0%}</div>
                 <div class="meta">
                     <span class="direction" title="Direction">{direction}</span>
@@ -235,6 +245,12 @@ def generate_report(tracks: dict, output_dir: str, video_name: str, video_path: 
             cursor: copy; margin-left: 6px; color: #7dd3fc; font-size: 1.1em;
         }}
         .deepchip:hover {{ color: #e94560; }}
+        .faces {{ display: flex; gap: 6px; margin: 4px 0; }}
+        .face {{
+            width: 52px; height: 52px; object-fit: cover; cursor: zoom-in;
+            border-radius: 6px; border: 2px solid #7dd3fc;
+        }}
+        .face:hover {{ opacity: 0.85; }}
         /* For persons, show top (face) instead of center */
         .card[data-class="person"] .thumbnail {{
             object-position: top;

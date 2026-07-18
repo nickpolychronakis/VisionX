@@ -29,3 +29,6 @@ snapshots: 4
 # as a chip on each vehicle card; the interactive plate.py stays the
 # deep-analysis tool)
 plates: true
+
+# Clearest face shot(s) per person track — extraction only, NO recognition
+faces: true
