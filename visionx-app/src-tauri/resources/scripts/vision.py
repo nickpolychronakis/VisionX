@@ -121,13 +121,24 @@ def run_auto_plates(tracks: dict, cfg: dict, json_progress: bool,
         return
     if json_progress:
         emit_json('status', message=f'Ανάγνωση πινακίδων ({len(vehicles)} οχήματα)...')
+    # One capture reused for the raw-frame resampling of all vehicles.
+    cap = cv2.VideoCapture(video_path) if video_path else None
     found = 0
     for t in vehicles:
         try:
             crops = [cv2.imdecode(np.frombuffer(s['jpeg'], np.uint8),
                                   cv2.IMREAD_COLOR)
                      for s in t.get('snapshots', [])]
-            res = reader.read_from_crops([c for c in crops if c is not None])
+            crops = [c for c in crops if c is not None]
+            # Raw-frame resampling: the report snapshots are chosen for the
+            # VEHICLE (and recompressed as JPEG) — often only 1 of them shows
+            # a readable plate, which reproduces the single-frame weakness
+            # our multi-frame research warns about (field case: confident
+            # wrong read from 1 frame). Cut up to 12 fresh crops straight
+            # from the video, spread across the track's trajectory.
+            if cap is not None and cap.isOpened():
+                crops += _resample_track_crops(cap, t, max_extra=12)
+            res = reader.read_from_crops(crops)
         except Exception as e:  # noqa: BLE001
             log_stderr(f'Plate read failed on a track ({e})')
             continue
@@ -145,7 +156,31 @@ def run_auto_plates(tracks: dict, cfg: dict, json_progress: bool,
             res['deep_cmd'] = (f'python plate.py "{video_path}" '
                                f'--roi {x1},{y1},{x2 - x1},{y2 - y1} '
                                f'--start-frame {frame_no}')
+    if cap is not None:
+        cap.release()
     log_stderr(f'Auto-ALPR: plates read on {found}/{len(vehicles)} vehicles')
+
+
+def _resample_track_crops(cap, track, max_extra=12, pad_ratio=0.15):
+    """Decode up to max_extra vehicle crops from the ORIGINAL video frames,
+    evenly spread over the track's per-frame boxes (no JPEG round-trip)."""
+    boxes = track.get('_boxes') or []
+    if not boxes:
+        return []
+    step = max(1, len(boxes) // max_extra)
+    out = []
+    for fi, x1, y1, x2, y2 in boxes[::step][:max_extra]:
+        cap.set(cv2.CAP_PROP_POS_FRAMES, fi)
+        ok, frame = cap.read()
+        if not ok:
+            continue
+        h, w = frame.shape[:2]
+        px, py = int((x2 - x1) * pad_ratio), int((y2 - y1) * pad_ratio)
+        cx1, cy1 = max(0, x1 - px), max(0, y1 - py)
+        cx2, cy2 = min(w, x2 + px), min(h, y2 + py)
+        if cx2 > cx1 and cy2 > cy1:
+            out.append(frame[cy1:cy2, cx1:cx2].copy())
+    return out
 
 
 def resolve_model_path(name: str, data_dir=None, resource_dir=None) -> str:
@@ -532,7 +567,8 @@ def process_video(source: str, yolo: YOLO, cfg: dict, args, video_index: int = 1
                 timestamp = (frame_num * stride) / fps
                 collector.add(track_id=track_id, class_name=class_name,
                               conf=det_conf, box_xyxy=box.tolist(),
-                              frame_img=result.orig_img, timestamp=timestamp)
+                              frame_img=result.orig_img, timestamp=timestamp,
+                              frame_idx=frame_num * stride)
 
         # Periodic VRAM cleanup (reduces fragmentation on NVIDIA)
         if device == 'cuda' and frames_since_cache_clear >= 30:
@@ -720,7 +756,8 @@ def process_video_chain(sources: list[str], yolo: YOLO, cfg: dict, args) -> str 
                                   conf=det_conf, box_xyxy=box.tolist(),
                                   frame_img=result.orig_img,
                                   timestamp=local_timestamp,
-                                  source_name=source_name)
+                                  source_name=source_name,
+                                  frame_idx=frame_in_video * stride)
 
         # Add this video's duration to cumulative time
         cumulative_time += info['frames'] / fps

@@ -28,7 +28,7 @@ class TrackCollector:
         self.max_snapshots = max_snapshots
 
     def add(self, *, track_id, class_name, conf, box_xyxy, frame_img,
-            timestamp, source_name=None):
+            timestamp, source_name=None, frame_idx=None):
         x1, y1, x2, y2 = map(int, box_xyxy)
         h, w = frame_img.shape[:2]
         cx, cy = (x1 + x2) / 2.0, (y1 + y2) / 2.0
@@ -50,6 +50,12 @@ class TrackCollector:
                 '_pos_sumsq': [0.0, 0.0],
                 '_max_diag': 0.0,
                 'snapshots': [],  # [{score, ts, file, jpeg, box}] sorted desc
+                # Per-frame boxes (tiny: 5 numbers/frame). Lets the auto-ALPR
+                # pass go BACK to the raw video and cut fresh vehicle crops
+                # across the whole trajectory — the report snapshots alone
+                # gave it only 1-2 usable plate views, which is exactly the
+                # single-frame weakness the multi-frame research warns about.
+                '_boxes': [],
             }
         t['confidence'] = max(t['confidence'], conf)
         t['last_seen'] = timestamp
@@ -62,6 +68,8 @@ class TrackCollector:
         t['_pos_sumsq'][0] += cx * cx
         t['_pos_sumsq'][1] += cy * cy
         t['_max_diag'] = max(t['_max_diag'], diag)
+        if frame_idx is not None:
+            t['_boxes'].append((int(frame_idx), x1, y1, x2, y2))
 
         # Snapshot candidacy — cheap proxy first (conf × size), so pixels are
         # only touched when the crop would actually enter the top-K. Full
@@ -147,6 +155,6 @@ def prepare_for_report(tracks: dict) -> dict:
                               for s in snaps]
         t['snapshot_ts'] = [s['ts'] for s in snaps]
         t['thumbnail'] = t['snapshots_b64'][0] if t['snapshots_b64'] else None
-        for k in ('snapshots', '_max_diag', '_emb_vpe', '_emb_hist'):
+        for k in ('snapshots', '_max_diag', '_emb_vpe', '_emb_hist', '_boxes'):
             t.pop(k, None)
     return tracks

@@ -98,10 +98,12 @@ class PlateReader:
             'det_conf': round(max(w for _, w in plates), 3),
             'frames_used': len(plates),
             'plate_px': plate_px,
-            # Reliability flag for the UI. Ground-truth field case: a 4-crop
-            # dusk read voted 95% for a plate KNOWN to be wrong — when every
-            # crop carries the same blur, consensus is confidently mistaken.
-            # Below ~60px width or under 3 voting frames the read must be
-            # presented as uncertain, alternatives up front.
-            'low_conf': plate_px < 60 or len(plates) < 3 or best['score'] < 0.5,
+            # Reliability flag for the UI. Ground-truth field cases: a 1-crop
+            # dusk read voted 95% for a plate KNOWN to be wrong, and even a
+            # 13-frame vote on a ~70px plate stayed confidently wrong on 3 of
+            # 7 characters — when every crop carries the same blur, consensus
+            # is mistaken with conviction. 90px threshold: below it the read
+            # renders as uncertain with alternatives up front; genuinely
+            # close-up plates (150px+) earn the confident style.
+            'low_conf': plate_px < 90 or len(plates) < 3 or best['score'] < 0.5,
         }
