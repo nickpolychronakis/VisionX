@@ -6,16 +6,34 @@ interface Settings {
   imgsz: number;
   outputDir: string;
   searchPrompts: string[];
+  stride: number;
+  parallel: number;
+  halfPrecision: boolean;
+  stitch: boolean;
+  plates: boolean;
+  faces: boolean;
 }
 
 const props = defineProps<{
   videoResolution?: number; // Max resolution of selected video(s)
 }>();
 
+const emit = defineEmits<{
+  (e: "pick-output-dir"): void;
+  (e: "clear-output-dir"): void;
+}>();
+
 const settings = defineModel<Settings>({ required: true });
 
 const isExpanded = ref(false);
+const showAdvanced = ref(false);
 const newPrompt = ref("");
+
+const outputDirName = computed(() => {
+  const d = settings.value.outputDir;
+  if (!d) return "";
+  return d.split(/[\\/]/).pop() || d;
+});
 
 // Dynamic imgsz options based on video resolution
 const imgszOptions = computed(() => {
@@ -138,6 +156,73 @@ function removePrompt(index: number) {
           }}
         </p>
       </div>
+
+      <!-- Analysis features (Phase A-Γ) -->
+      <div class="setting-row">
+        <label><span class="label-text">Λειτουργίες Ανάλυσης</span></label>
+        <label class="switch-row">
+          <input type="checkbox" v-model="settings.stitch" />
+          <span>Ένωση διαδρομών — κάθε αντικείμενο μία φορά (όχι διπλές εγγραφές)</span>
+        </label>
+        <label class="switch-row">
+          <input type="checkbox" v-model="settings.plates" />
+          <span>Αυτόματη ανάγνωση πινακίδων στα οχήματα</span>
+        </label>
+        <label class="switch-row">
+          <input type="checkbox" v-model="settings.faces" />
+          <span>Εξαγωγή καθαρών λήψεων προσώπου (χωρίς αναγνώριση ταυτότητας)</span>
+        </label>
+      </div>
+
+      <!-- Output directory -->
+      <div class="setting-row">
+        <label><span class="label-text">Φάκελος Αποθήκευσης</span></label>
+        <div class="dir-row">
+          <span class="dir-name" :title="settings.outputDir">
+            {{ outputDirName || "Δίπλα στο βίντεο (προεπιλογή)" }}
+          </span>
+          <button class="secondary small" @click="emit('pick-output-dir')">Επιλογή…</button>
+          <button v-if="settings.outputDir" class="secondary small" @click="emit('clear-output-dir')">✕</button>
+        </div>
+      </div>
+
+      <!-- Advanced (collapsed) -->
+      <div class="setting-row">
+        <button class="advanced-toggle" @click="showAdvanced = !showAdvanced">
+          <span class="arrow" :class="{ expanded: showAdvanced }">▸</span>
+          Προχωρημένες ρυθμίσεις (ταχύτητα)
+        </button>
+      </div>
+      <template v-if="showAdvanced">
+        <div class="setting-row">
+          <label>
+            <span class="label-text">Βήμα καρέ (stride)</span>
+            <span class="label-value">κάθε {{ settings.stride }}ο καρέ</span>
+          </label>
+          <input type="range" v-model.number="settings.stride" min="1" max="10" step="1" />
+          <p class="setting-hint">
+            Αναλύεται 1 στα Ν καρέ. Μεγαλύτερο = ταχύτερο, αλλά μπορεί να χαθούν
+            σύντομες εμφανίσεις. Προτείνεται 1 για ασφάλεια.
+          </p>
+        </div>
+        <div class="setting-row">
+          <label>
+            <span class="label-text">Παράλληλα βίντεο</span>
+            <span class="label-value">{{ settings.parallel }}</span>
+          </label>
+          <input type="range" v-model.number="settings.parallel" min="1" max="8" step="1" />
+          <p class="setting-hint">
+            Επεξεργασία πολλών βίντεο ταυτόχρονα. Ταχύτερο σε δυνατά μηχανήματα,
+            αλλά χρησιμοποιεί περισσότερη μνήμη/GPU.
+          </p>
+        </div>
+        <div class="setting-row">
+          <label class="switch-row">
+            <input type="checkbox" v-model="settings.halfPrecision" />
+            <span>FP16 — ταχύτερο σε κάρτες NVIDIA με Tensor Cores</span>
+          </label>
+        </div>
+      </template>
     </div>
   </div>
 </template>
@@ -271,5 +356,64 @@ select {
 
 .prompt-tag button:hover {
   color: var(--accent);
+}
+
+.switch-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-size: 0.85rem;
+  color: var(--text-secondary);
+  cursor: pointer;
+}
+
+.switch-row input[type="checkbox"] {
+  width: 16px;
+  height: 16px;
+  accent-color: var(--accent);
+  flex-shrink: 0;
+  cursor: pointer;
+}
+
+.dir-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.dir-name {
+  flex: 1;
+  font-size: 0.85rem;
+  color: var(--text-secondary);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.secondary.small {
+  padding: 4px 12px;
+  font-size: 0.8rem;
+}
+
+.advanced-toggle {
+  background: transparent;
+  color: var(--text-secondary);
+  padding: 4px 0;
+  font-size: 0.85rem;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.advanced-toggle:hover {
+  color: var(--text-primary);
+}
+
+.advanced-toggle .arrow {
+  transition: transform 0.2s ease;
+}
+
+.advanced-toggle .arrow.expanded {
+  transform: rotate(90deg);
 }
 </style>

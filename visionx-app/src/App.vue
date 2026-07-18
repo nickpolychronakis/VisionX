@@ -1,7 +1,8 @@
 <script setup lang="ts">
-import { ref, computed, onMounted, onUnmounted } from "vue";
+import { ref, computed, onMounted, onUnmounted, watch } from "vue";
 import { invoke } from "@tauri-apps/api/core";
 import { listen, UnlistenFn } from "@tauri-apps/api/event";
+import { open } from "@tauri-apps/plugin-dialog";
 import LandingPage from "./components/LandingPage.vue";
 import FileSelector from "./components/FileSelector.vue";
 import SettingsPanel from "./components/SettingsPanel.vue";
@@ -16,13 +17,33 @@ const currentView = ref<AppView>("loading");
 // Selected files
 const selectedFiles = ref<string[]>([]);
 
-// Settings
-const settings = ref({
+// Settings — persisted to localStorage so they survive app restarts
+// (previously volatile Vue refs, reset every launch).
+const SETTINGS_KEY = "visionx.settings.v1";
+const DEFAULT_SETTINGS = {
   confidence: 0.35,
   imgsz: 640,
   outputDir: "",
   searchPrompts: [] as string[],
-});
+  // Advanced
+  stride: 1,
+  parallel: 1,
+  halfPrecision: false,
+  // Analysis features (Phase A-Γ) — all ON by default
+  stitch: true,
+  plates: true,
+  faces: true,
+};
+function loadSettings() {
+  try {
+    const raw = localStorage.getItem(SETTINGS_KEY);
+    if (raw) return { ...DEFAULT_SETTINGS, ...JSON.parse(raw) };
+  } catch (e) {
+    console.error("Failed to load settings:", e);
+  }
+  return { ...DEFAULT_SETTINGS };
+}
+const settings = ref(loadSettings());
 
 // Progress state
 const progress = ref({
@@ -49,6 +70,34 @@ let unlistenStatus: UnlistenFn | null = null;
 
 // Computed
 const canProcess = computed(() => selectedFiles.value.length > 0);
+
+// Persist settings on every change (deep watch).
+watch(settings, (val) => {
+  try {
+    localStorage.setItem(SETTINGS_KEY, JSON.stringify(val));
+  } catch (e) {
+    console.error("Failed to save settings:", e);
+  }
+}, { deep: true });
+
+// Pick an output directory via the native folder dialog.
+async function pickOutputDir() {
+  const dir = await open({ directory: true, multiple: false });
+  if (typeof dir === "string") settings.value.outputDir = dir;
+}
+function clearOutputDir() {
+  settings.value.outputDir = "";
+}
+
+// Launch the interactive plate tool on a single video (plate-only mode).
+async function runPlateTool() {
+  if (selectedFiles.value.length === 0) return;
+  try {
+    await invoke("run_plate_tool", { video: selectedFiles.value[0] });
+  } catch (e) {
+    processingError.value = String(e);
+  }
+}
 
 // Setup event listeners
 onMounted(async () => {
@@ -160,12 +209,15 @@ async function startProcessing() {
       files: selectedFiles.value,
       config: {
         confidence: settings.value.confidence,
-        stride: 1,
-        half_precision: false,
+        stride: settings.value.stride,
+        half_precision: settings.value.halfPrecision,
         imgsz: settings.value.imgsz,
-        parallel: 1,
+        parallel: settings.value.parallel,
         output_dir: settings.value.outputDir,
         search_prompts: settings.value.searchPrompts,
+        stitch: settings.value.stitch,
+        plates: settings.value.plates,
+        faces: settings.value.faces,
       },
     });
 
@@ -261,7 +313,13 @@ function startNew() {
           </ul>
         </div>
 
-        <SettingsPanel v-if="selectedFiles.length > 0" v-model="settings" :videoResolution="videoResolution" />
+        <SettingsPanel
+          v-if="selectedFiles.length > 0"
+          v-model="settings"
+          :videoResolution="videoResolution"
+          @pick-output-dir="pickOutputDir"
+          @clear-output-dir="clearOutputDir"
+        />
 
         <div v-if="selectedFiles.length > 0" class="actions">
           <button
@@ -270,6 +328,13 @@ function startNew() {
             @click="startProcessing"
           >
             Έναρξη Επεξεργασίας
+          </button>
+          <button
+            class="secondary plate-btn"
+            :title="selectedFiles.length > 1 ? 'Χρησιμοποιεί το πρώτο βίντεο' : ''"
+            @click="runPlateTool"
+          >
+            🚘 Ανάγνωση Πινακίδας
           </button>
         </div>
       </div>
@@ -457,6 +522,11 @@ function startNew() {
 
 .start-btn {
   padding: 14px 40px;
+  font-size: 1rem;
+}
+
+.plate-btn {
+  padding: 14px 24px;
   font-size: 1rem;
 }
 

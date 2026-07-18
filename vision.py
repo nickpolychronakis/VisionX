@@ -835,6 +835,13 @@ Examples:
     parser.add_argument('--show', action='store_true', help='Live preview')
     parser.add_argument('--parallel', type=int, default=1, help='Number of parallel workers')
     parser.add_argument('--chain', action='store_true', help='Process multiple videos as continuous sequence')
+    # Phase A-Γ feature toggles (all default ON via config; these disable).
+    parser.add_argument('--no-stitch', action='store_true',
+                        help='Disable offline tracklet stitching')
+    parser.add_argument('--no-plates', action='store_true',
+                        help='Disable automatic license-plate reading')
+    parser.add_argument('--no-faces', action='store_true',
+                        help='Disable face best-shot extraction')
     parser.add_argument('--config', default=None, help='Config file')
     parser.add_argument('--resource-dir', default=None, help='Bundled resources directory (set by Tauri)')
     parser.add_argument('--data-dir', default=None, help='Writable app data directory (set by Tauri)')
@@ -888,6 +895,13 @@ Examples:
     # processing functions receive cfg but not the arg dirs.
     cfg['_data_dir'] = data_dir
     cfg['_resource_dir'] = resource_dir
+    # CLI feature toggles override config (used by the GUI's advanced panel).
+    if args.no_stitch:
+        cfg['stitch'] = False
+    if args.no_plates:
+        cfg['plates'] = False
+    if args.no_faces:
+        cfg['faces'] = False
 
     # Collect video files
     video_files = []

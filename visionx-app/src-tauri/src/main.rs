@@ -38,7 +38,17 @@ struct ProcessConfig {
     parallel: u32,
     output_dir: String,
     search_prompts: Vec<String>,
+    // Phase A-Γ toggles. #[serde(default)] so older frontends (and any
+    // cached settings) that omit them keep the analysis features ON.
+    #[serde(default = "default_true")]
+    stitch: bool,
+    #[serde(default = "default_true")]
+    plates: bool,
+    #[serde(default = "default_true")]
+    faces: bool,
 }
+
+fn default_true() -> bool { true }
 
 // Global state to track the current process
 struct ProcessState {
@@ -195,6 +205,17 @@ async fn process_videos(
     if !config.output_dir.is_empty() {
         args.push("--output".to_string());
         args.push(config.output_dir.clone());
+    }
+
+    // Analysis-feature toggles (default ON; only pass the disabling flag).
+    if !config.stitch {
+        args.push("--no-stitch".to_string());
+    }
+    if !config.plates {
+        args.push("--no-plates".to_string());
+    }
+    if !config.faces {
+        args.push("--no-faces".to_string());
     }
 
     for prompt in &config.search_prompts {
@@ -493,6 +514,46 @@ fn show_in_folder(path: String) -> Result<(), String> {
     Ok(())
 }
 
+/// Launch the interactive license-plate tool (plate.py) on a video. It opens
+/// its own native OpenCV window for ROI selection + tracking, so we spawn it
+/// detached and return immediately (the app stays usable meanwhile).
+#[tauri::command]
+fn run_plate_tool(app: AppHandle, video: String) -> Result<(), String> {
+    let data_dir = app.path().app_data_dir()
+        .map_err(|e| format!("Failed to get data dir: {}", e))?;
+    let python_exe = setup::python_exe_path(&data_dir);
+    let scripts_dir = setup::scripts_dir_path(&data_dir);
+    let packages_dir = setup::packages_dir_path(&data_dir);
+    let plate_script = scripts_dir.join("plate.py");
+
+    if !python_exe.exists() {
+        return Err("Python not installed. Please run setup first.".to_string());
+    }
+    if !plate_script.exists() {
+        return Err("Plate tool not found. Please update and re-run setup.".to_string());
+    }
+
+    let use_system = setup::is_system_python(&data_dir);
+    // PYTHONPATH must include scripts dir so plate.py can import plate_report.
+    let python_path = if use_system {
+        scripts_dir.to_string_lossy().to_string()
+    } else {
+        format!("{}{}{}", packages_dir.to_string_lossy(),
+                if cfg!(windows) { ";" } else { ":" },
+                scripts_dir.to_string_lossy())
+    };
+
+    Command::new(&python_exe)
+        .arg(plate_script.to_string_lossy().to_string())
+        .arg(&video)
+        .env("PYTHONUTF8", "1")
+        .env("PYTHONPATH", python_path)
+        .current_dir(&scripts_dir)
+        .spawn()
+        .map_err(|e| format!("Failed to launch plate tool: {}", e))?;
+    Ok(())
+}
+
 // ============================================================
 // Update commands
 // ============================================================
@@ -649,6 +710,7 @@ fn main() {
             get_report_content,
             open_file,
             show_in_folder,
+            run_plate_tool,
             // Updates
             check_for_updates,
             install_update,
