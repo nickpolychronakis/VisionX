@@ -905,6 +905,31 @@ def fuse(samples: list[Sample], top_k: int) -> tuple:
     return cv2.addWeighted(fused, 1.5, blur, -0.5, 0), len(chosen)
 
 
+def wiener_deblur(img: np.ndarray, sigma: float = 2.5) -> np.ndarray:
+    """Wiener deconvolution with a Gaussian (defocus) PSF — DISPLAY ONLY.
+
+    Ground-truth evaluation (plate YHH3472, 23-PSF grid incl. motion kernels):
+    feeding deconvolved renderings into the OCR vote DILUTED the correct
+    consensus (P(truth) 0.42 → 0.41 combined, 0.36 alone) because real dashcam
+    blur is a compression/demosaic/defocus mix, not a clean linear PSF, and
+    deconvolution amplifies its noise. It stays out of the vote; it is offered
+    to the HUMAN examiner only (Amped-style optical deblurring rendering),
+    where a subtly crisper stroke separation can aid shape completion.
+    """
+    gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY).astype(np.float32) / 255.0
+    k = cv2.getGaussianKernel(21, sigma)
+    psf = (k @ k.T).astype(np.float32)
+    pad = np.zeros_like(gray)
+    pad[:21, :21] = psf
+    pad = np.roll(pad, (-10, -10), axis=(0, 1))
+    H = np.fft.fft2(pad)
+    G = np.fft.fft2(gray)
+    # K=0.01: noise-to-signal estimate — lower rings badly on 8-bit video noise
+    F = np.conj(H) / (np.abs(H) ** 2 + 0.01) * G
+    f = np.clip(np.real(np.fft.ifft2(F)) * 255, 0, 255).astype(np.uint8)
+    return cv2.cvtColor(f, cv2.COLOR_GRAY2BGR)
+
+
 def human_view(img: np.ndarray, scale: int = 4) -> np.ndarray:
     """Large display version for reading with the naked eye (user request:
     "the fusion must show the number visually"). Percentile contrast stretch
@@ -1273,6 +1298,8 @@ def save_outputs(video_path, out_dir, samples, ref, fused_img, candidates, reads
         # Negative: not OCR'd (models expect normal polarity) but a standard
         # examiner rendering — stroke gaps often pop in inverted contrast.
         variants.append(('Αρνητικό', 255 - big))
+        # Wiener deblur: display-only too (see wiener_deblur docstring).
+        variants.append(('Αποθόλωση', wiener_deblur(big)))
         read = ocr_by_frame.get(s.frame_idx)
         panels.append({'frame': s.frame_idx, 'variants': variants,
                        'read': read['text'] if read else None,
@@ -1300,6 +1327,8 @@ def save_outputs(video_path, out_dir, samples, ref, fused_img, candidates, reads
         out, result,
         {'fused_large': human_view(fused_img) if fused_img is not None else None,
          'best_frame_large': human_view(ref.rect) if ref is not None else None,
+         'fused_deconv': human_view(wiener_deblur(fused_img))
+                         if fused_img is not None else None,
          'sheet': sheet},
         panels,
         {'steps': steps, 'models': model_names, 'detector': args.detector_model})
@@ -1308,23 +1337,31 @@ def save_outputs(video_path, out_dir, samples, ref, fused_img, candidates, reads
 
 def print_results(candidates, gr_candidates, reads, region_votes, n_samples,
                   aligned, fused_n):
-    log(f'\nTracked {n_samples} frames, ECC-aligned {aligned}, '
-        f'fusion {f"of {fused_n} frames" if fused_n else "skipped (too few well-aligned frames)"}')
+    """Print the summary AND return it as lines, so main() can also save it
+    as summary.txt in the output folder (user request: the report must live
+    with the rest of the artifacts, in copy-pasteable text form too)."""
+    lines = [f'Tracked {n_samples} frames, ECC-aligned {aligned}, '
+             f'fusion {f"of {fused_n} frames" if fused_n else "skipped (too few well-aligned frames)"}']
     if region_votes:
-        region = max(region_votes, key=region_votes.get)
-        log(f'Region hint: {region}')
-    log('\n=== Plate candidates (for DB search — not evidentiary) ===')
+        lines.append(f'Region hint: {max(region_votes, key=region_votes.get)}')
+    lines.append('')
+    lines.append('=== Plate candidates (for DB search — not evidentiary) ===')
     for i, c in enumerate(candidates, 1):
         flag = ' [GR format]' if c.pattern_match else ''
-        log(f'  {i}. {c.plate:<10}  score {c.score:.3f}{flag}')
+        lines.append(f'  {i}. {c.plate:<10}  score {c.score:.3f}{flag}')
     if not candidates:
-        log('  (no readable candidates — try a different segment or larger ROI)')
+        lines.append('  (no readable candidates — try a different segment or larger ROI)')
     if gr_candidates:
-        log('\n=== Projected onto the Greek plate shape (ΓΓΓ-9999 / ΓΓΓ-999) ===')
+        lines.append('')
+        lines.append('=== Projected onto the Greek plate shape (ΓΓΓ-9999 / ΓΓΓ-999) ===')
         for i, c in enumerate(gr_candidates, 1):
-            log(f'  {i}. {c.plate:<10}  score {c.score:.3f}')
-        log('  (use this list if the vehicle is Greek; the free list above '
-            'covers foreign plates)')
+            lines.append(f'  {i}. {c.plate:<10}  score {c.score:.3f}')
+        lines.append('  (use this list if the vehicle is Greek; the free list '
+                     'above covers foreign plates)')
+    log('')
+    for ln in lines:
+        log(ln)
+    return lines
 
 
 # ---------------------------------------------------------------------------
@@ -1462,8 +1499,12 @@ def main():
         reads, region_votes, roi, start_frame, fps, args,
         fused_n=fused_n, gr_candidates=gr_candidates)
 
-    print_results(candidates, gr_candidates, reads, region_votes, len(samples),
-                  aligned, fused_n)
+    summary = print_results(candidates, gr_candidates, reads, region_votes,
+                            len(samples), aligned, fused_n)
+    # Plain-text copy of the console summary, saved with the artifacts.
+    with open(Path(out_dir) / 'summary.txt', 'w', encoding='utf-8') as f:
+        f.write(f'Video: {video_path}\nROI: {roi} @ frame {start_frame}\n\n')
+        f.write('\n'.join(summary) + '\n')
     log('\nScore = σχετική κατάταξη (0-1), όχι πιθανότητα. "?" = αβέβαιη θέση — '
         'δες εναλλακτικές ανά θέση στο report.')
     if report_path:

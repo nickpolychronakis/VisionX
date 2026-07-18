@@ -70,6 +70,11 @@ def generate(out_dir, result, imgs, panels, meta):
         img_html += (f'<figure><img src="{_b64(imgs["best_frame_large"])}">'
                      '<figcaption>Καλύτερο μεμονωμένο καρέ (μέγιστη ευκρίνεια, '
                      'επιβεβαιωμένο από τον ανιχνευτή).</figcaption></figure>')
+    if imgs.get('fused_deconv') is not None:
+        img_html += (f'<figure><img src="{_b64(imgs["fused_deconv"])}">'
+                     '<figcaption>Συγχώνευση + αποθόλωση Wiener — απόδοση ΜΟΝΟ '
+                     'για οπτικό έλεγχο (δεν συμμετέχει στην ψηφοφορία OCR: '
+                     'μετρήθηκε ότι δεν τη βελτιώνει).</figcaption></figure>')
 
     panel_html = ''
     for p in panels:
