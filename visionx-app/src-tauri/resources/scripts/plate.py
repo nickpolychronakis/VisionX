@@ -1353,7 +1353,7 @@ def print_results(candidates, gr_candidates, reads, region_votes, n_samples,
         lines.append('  (no readable candidates — try a different segment or larger ROI)')
     if gr_candidates:
         lines.append('')
-        lines.append('=== Projected onto the Greek plate shape (ΓΓΓ-9999 / ΓΓΓ-999) ===')
+        lines.append('=== Greek-plate candidates (projected onto the Greek format) ===')
         for i, c in enumerate(gr_candidates, 1):
             lines.append(f'  {i}. {c.plate:<10}  score {c.score:.3f}')
         lines.append('  (use this list if the vehicle is Greek; the free list '
@@ -1508,7 +1508,13 @@ def main():
     log('\nScore = σχετική κατάταξη (0-1), όχι πιθανότητα. "?" = αβέβαιη θέση — '
         'δες εναλλακτικές ανά θέση στο report.')
     if report_path:
-        log(f'\nΑναφορά:  {report_path}  ← άνοιξέ τη στον browser')
+        log(f'\nΑναφορά:  {report_path}')
+        if not args.no_gui:
+            # Open the report right away (user request): the analysis ends
+            # with the human READING it, not hunting for a file. Batch runs
+            # (--no-gui) stay silent so scripts don't spawn browser windows.
+            import webbrowser
+            webbrowser.open(Path(report_path).resolve().as_uri())
     log(f'Δεδομένα: {json_path}')
     log(f'Εικόνες:  {Path(out_dir) / "fused_large.png"}  (συγχώνευση σε μέγεθος ανάγνωσης)')
 
