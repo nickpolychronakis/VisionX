@@ -221,6 +221,10 @@ async function openLog() {
   overflow-y: auto;
   display: flex;
   flex-direction: column;
+  /* Center the content in the available height: without this the cards sat
+     at the top and the CTA at the very bottom, leaving a large dead zone
+     in the middle of the landing screen. */
+  justify-content: center;
   gap: 16px;
   padding: 10px 0;
 }
