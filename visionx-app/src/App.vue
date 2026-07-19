@@ -308,7 +308,7 @@ function startNew() {
       <div v-if="currentView === 'select'" class="view-select" key="select">
         <FileSelector @files-selected="onFilesSelected" />
 
-        <div v-if="selectedFiles.length > 0" class="selected-files card">
+        <div v-if="selectedFiles.length > 0" class="selected-files card card-teal">
           <h3>Επιλεγμένα Βίντεο ({{ selectedFiles.length }})</h3>
           <ul class="file-list">
             <li v-for="(file, index) in selectedFiles" :key="file">

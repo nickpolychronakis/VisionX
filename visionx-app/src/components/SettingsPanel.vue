@@ -92,7 +92,7 @@ const imgszLabel = computed(() => {
 </script>
 
 <template>
-  <div class="settings-panel card">
+  <div class="settings-panel card card-violet">
     <button class="toggle-btn" @click="isExpanded = !isExpanded">
       <span>Ρυθμίσεις</span>
       <span class="arrow" :class="{ expanded: isExpanded }">▼</span>

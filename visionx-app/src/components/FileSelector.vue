@@ -77,7 +77,7 @@ async function selectFolder() {
 </script>
 
 <template>
-  <div class="file-selector card" :class="{ dragging: isDragging }">
+  <div class="file-selector card card-blue" :class="{ dragging: isDragging }">
     <div class="icon">
       <svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
         <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />

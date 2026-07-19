@@ -6,16 +6,16 @@
    these variables, so the refresh propagates everywhere. */
 
 :root {
-  --bg-primary: #0f1116;
-  --bg-secondary: #181b22;
-  --bg-card: rgba(255, 255, 255, 0.045);
+  --bg-primary: #151926;
+  --bg-secondary: #1e2432;
+  --bg-card: rgba(255, 255, 255, 0.06);
   --text-primary: #f2f4f8;
-  --text-secondary: #9aa3b2;
+  --text-secondary: #a8b2c3;
   --accent: #4f8cff;
   --accent-hover: #6ba3ff;
   --success: #34d399;
   --danger: #ef4466;
-  --border: rgba(255, 255, 255, 0.09);
+  --border: rgba(255, 255, 255, 0.12);
   --shadow: 0 8px 24px rgba(0, 0, 0, 0.35);
   --radius: 14px;
 }
@@ -44,9 +44,14 @@ html, body, #app {
    makes the window essentially opaque and the native vibrancy invisible
    (verified visually while capturing UI screenshots). */
 html {
+  /* "Aurora" wash: three soft colour pools (blue / violet / teal) over a
+     lighter tint than before — the user asked for a brighter, more colourful
+     surface, and the lower alpha also lets more desktop vibrancy through. */
   background:
-    radial-gradient(1200px 500px at 50% -10%, rgba(79, 140, 255, 0.08), transparent),
-    rgb(15 17 22 / 0.86);
+    radial-gradient(900px 480px at 15% -5%, rgba(79, 140, 255, 0.16), transparent 60%),
+    radial-gradient(800px 500px at 95% 12%, rgba(167, 122, 255, 0.13), transparent 60%),
+    radial-gradient(900px 600px at 55% 110%, rgba(45, 212, 191, 0.10), transparent 60%),
+    rgb(21 25 36 / 0.82);
 }
 
 body, #app {
@@ -147,6 +152,42 @@ input:focus, select:focus {
   border: 1px solid var(--border);
   backdrop-filter: blur(8px);
   box-shadow: var(--shadow);
+}
+
+/* Colour-identity cards: each workspace section carries its own hue so the
+   eye can find it instantly — blue = source videos, teal = selected list,
+   violet = settings, amber = plate tool. The hue is an RGB triplet consumed
+   at low alpha, so cards stay glassy rather than becoming solid colour. */
+.card-blue   { --card-hue: 79, 140, 255; }
+.card-teal   { --card-hue: 45, 212, 191; }
+.card-violet { --card-hue: 167, 122, 255; }
+.card-amber  { --card-hue: 255, 184, 76; }
+.card-rose   { --card-hue: 255, 99, 132; }
+
+.card[class*="card-"] {
+  background:
+    linear-gradient(160deg, rgba(var(--card-hue), 0.13), rgba(var(--card-hue), 0.03) 60%),
+    var(--bg-card);
+  border-color: rgba(var(--card-hue), 0.32);
+}
+
+.card[class*="card-"] > h3,
+.card[class*="card-"] > .toggle-btn {
+  color: rgb(var(--card-hue));
+}
+
+/* The plate tool is its own mini-feature — give its launcher the amber
+   identity so it doesn't read as a generic secondary button. */
+button.plate-btn {
+  background: linear-gradient(180deg, rgba(255, 184, 76, 0.18), rgba(255, 184, 76, 0.07));
+  border: 1px solid rgba(255, 184, 76, 0.38);
+  color: #ffd699;
+}
+
+button.plate-btn:hover {
+  background: linear-gradient(180deg, rgba(255, 184, 76, 0.26), rgba(255, 184, 76, 0.12));
+  border-color: rgba(255, 184, 76, 0.55);
+  transform: translateY(-1px);
 }
 
 /* Slim, unobtrusive scrollbars (webkit — covers the Tauri webview) */
