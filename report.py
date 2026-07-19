@@ -123,6 +123,9 @@ def generate_report(tracks: dict, output_dir: str, video_name: str, video_path: 
             info = (a.get('clothing') or {}).get(part)
             if info:
                 attrs_html += _color_chip(label, info['color'])
+        for pm in track.get('prompt_matches') or []:
+            attrs_html += (f'<span class="attr promptmatch">&#128269; '
+                           f'{html_mod.escape(pm)}</span>')
         if attrs_html:
             attrs_html = f'<div class="attrs">{attrs_html}</div>'
 
@@ -302,6 +305,7 @@ def generate_report(tracks: dict, output_dir: str, video_name: str, video_path: 
             width: 10px; height: 10px; border-radius: 50%;
             display: inline-block; border: 1px solid rgba(255,255,255,0.35);
         }}
+        .attr.promptmatch {{ background: #143a2b; color: #7fd98a; }}
         /* For persons, show top (face) instead of center */
         .card[data-class="person"] .thumbnail {{
             object-position: top;

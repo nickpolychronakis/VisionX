@@ -44,7 +44,8 @@
       "resources/scripts/face_shots.py": "scripts/face_shots.py",
       "resources/scripts/cross_match.py": "scripts/cross_match.py",
       "resources/scripts/match_report.py": "scripts/match_report.py",
-      "resources/scripts/attributes.py": "scripts/attributes.py"
+      "resources/scripts/attributes.py": "scripts/attributes.py",
+      "resources/scripts/prompt_filter.py": "scripts/prompt_filter.py"
     },
     "icon": [
       "icons/32x32.png",

@@ -139,6 +139,33 @@ def run_attributes(tracks: dict, cfg: dict, json_progress: bool):
             log_stderr(f'Attribute extraction failed on a track ({e})')
 
 
+def run_prompt_filter(tracks: dict, cfg: dict, args, json_progress: bool):
+    """Stage-2 free-text filtering on the results (see prompt_filter.py).
+    Requires the stitching embeddings for the semantic path; computes them
+    if the stitching pass was skipped."""
+    search = getattr(args, 'search', None)
+    if not search or not tracks:
+        return
+    try:
+        import prompt_filter
+        import stitch as _stitch
+        if not any(t.get('_emb_vpe') is not None for t in tracks.values()):
+            embed_path = resolve_model_path(
+                cfg.get('stitch_embed_model', 'yoloe-26n-seg.pt'),
+                cfg.get('_data_dir'), cfg.get('_resource_dir'))
+            _stitch.compute_embeddings(tracks, embed_path, log=log_stderr)
+        embed_path = resolve_model_path(
+            cfg.get('stitch_embed_model', 'yoloe-26n-seg.pt'),
+            cfg.get('_data_dir'), cfg.get('_resource_dir'))
+        if json_progress:
+            emit_json('status', message='Φιλτράρισμα αποτελεσμάτων με τα κριτήρια...')
+        prompt_filter.apply_prompts(tracks, search, embed_path,
+                                    VEHICLE_KEYWORDS, PERSON_KEYWORDS,
+                                    log=log_stderr)
+    except Exception as e:  # noqa: BLE001
+        log_stderr(f'Prompt filtering failed ({e})')
+
+
 def run_auto_plates(tracks: dict, cfg: dict, json_progress: bool,
                     fps: float | None = None, video_path: str | None = None):
     """Attach plate candidates to vehicle tracks (in place). Failures only
@@ -642,6 +669,7 @@ def process_video(source: str, yolo: YOLO, cfg: dict, args, video_index: int = 1
     run_auto_plates(tracks, cfg, json_progress, fps=fps, video_path=source)
     run_face_shots(tracks, cfg, json_progress)
     run_attributes(tracks, cfg, json_progress)
+    run_prompt_filter(tracks, cfg, args, json_progress)
 
     log_stderr(f'Processing complete: {source_path.name} — {n_raw} tracklets '
                f'-> {len(tracks)} objects, {frame_num} frames analyzed')
@@ -888,6 +916,7 @@ def process_video_chain(sources: list[str], yolo: YOLO, cfg: dict, args) -> str 
     run_auto_plates(tracks, cfg, json_progress)
     run_face_shots(tracks, cfg, json_progress)
     run_attributes(tracks, cfg, json_progress)
+    run_prompt_filter(tracks, cfg, args, json_progress)
     tracks = prepare_for_report(tracks)
     log_stderr(f'Chain complete: {n_raw} tracklets -> {len(tracks)} objects')
 
@@ -1063,21 +1092,20 @@ Examples:
         parser.print_help()
         return
 
-    # Automatic model selection (see BENCHMARKS.md, quality-first): without
-    # custom prompts the scope is FIXED (people + all vehicle types), where
-    # closed-set YOLO26 both tracks more stably (yoloe-26x produced the most
-    # fragmented tracks of all candidates) AND runs ~2x faster. Open-vocab
-    # YOLOE loads only when the user actually searches free text. User-driven
-    # design: attributes (color etc.) are computed AFTERWARDS on the results,
-    # not by widening the detector's vocabulary.
-    closed_mode = not args.search
+    # Two-stage architecture (user-designed, see BENCHMARKS.md): detection
+    # ALWAYS runs closed-set yolo26l on the fixed scope (people + vehicles) —
+    # best tracking stability at ~half the old default's latency. Free-text
+    # prompts do NOT change the detector: they are applied at stage 2 as
+    # filters on the results (class/color attributes deterministically,
+    # semantic embedding ranking otherwise — see prompt_filter.py). The only
+    # way to run open-vocabulary DETECTION (objects outside the fixed scope)
+    # is an explicit --model yoloe-*.
     if args.model:
         model_path = args.model
         closed_mode = 'yoloe' not in Path(args.model).name.lower()
-    elif closed_mode:
-        model_path = cfg.get('model_closed', 'yolo26l.pt')
     else:
-        model_path = cfg['model']
+        model_path = cfg.get('model_closed', 'yolo26l.pt')
+        closed_mode = True
     prompts = args.search or cfg['prompts']
     # COCO ids for the fixed scope: person bicycle car motorcycle bus truck
     cfg['_closed_classes'] = [0, 1, 2, 3, 5, 7] if closed_mode else None
@@ -1177,6 +1205,8 @@ Examples:
 
     scope_label = ('άνθρωποι + οχήματα (όλοι οι τύποι)' if closed_mode
                    else ', '.join(prompts))
+    if closed_mode and args.search:
+        scope_label += f' — φίλτρο αποτελεσμάτων: {", ".join(args.search)}'
     if json_progress:
         emit_json('status', message=f'Αναζήτηση: {scope_label}')
         emit_json('status', message=f'{len(video_files)} βίντεο προς ανάλυση')
