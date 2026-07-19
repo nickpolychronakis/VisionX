@@ -24,7 +24,9 @@ const DEFAULT_SETTINGS = {
   confidence: 0.35,
   imgsz: 640,
   outputDir: "",
-  searchPrompts: [] as string[],
+  // Structured filters (fixed choices) — free text removed by design.
+  filterColors: [] as string[],
+  filterTypes: [] as string[],
   // Advanced
   stride: 1,
   parallel: 1,
@@ -218,7 +220,8 @@ async function startProcessing() {
         imgsz: settings.value.imgsz,
         parallel: settings.value.parallel,
         output_dir: settings.value.outputDir,
-        search_prompts: settings.value.searchPrompts,
+        filter_colors: settings.value.filterColors,
+        filter_types: settings.value.filterTypes,
         stitch: settings.value.stitch,
         plates: settings.value.plates,
         faces: settings.value.faces,

@@ -5,13 +5,44 @@ interface Settings {
   confidence: number;
   imgsz: number;
   outputDir: string;
-  searchPrompts: string[];
+  filterColors: string[];
+  filterTypes: string[];
   stride: number;
   parallel: number;
   halfPrecision: boolean;
   stitch: boolean;
   plates: boolean;
   faces: boolean;
+}
+
+// Fixed, reliable filter choices — free text was removed by design.
+const FILTER_COLORS = [
+  { value: "λευκό", css: "#f5f5f5" },
+  { value: "μαύρο", css: "#111111" },
+  { value: "γκρι/ασημί", css: "#9aa0a6" },
+  { value: "κόκκινο", css: "#d93025" },
+  { value: "μπλε", css: "#1a73e8" },
+  { value: "γαλάζιο", css: "#12b5cb" },
+  { value: "πράσινο", css: "#188038" },
+  { value: "κίτρινο", css: "#fbbc04" },
+  { value: "πορτοκαλί", css: "#f29900" },
+  { value: "καφέ", css: "#8d6e63" },
+  { value: "μωβ", css: "#9334e6" },
+  { value: "ροζ", css: "#e8368f" },
+];
+const FILTER_TYPES = [
+  { value: "car", label: "Αυτοκίνητο" },
+  { value: "motorcycle", label: "Μοτοσικλέτα" },
+  { value: "truck", label: "Φορτηγό" },
+  { value: "bus", label: "Λεωφορείο" },
+  { value: "bicycle", label: "Ποδήλατο" },
+  { value: "person", label: "Άτομο" },
+];
+
+function toggleIn(list: string[], value: string) {
+  const i = list.indexOf(value);
+  if (i >= 0) list.splice(i, 1);
+  else list.push(value);
 }
 
 const props = defineProps<{
@@ -27,7 +58,6 @@ const settings = defineModel<Settings>({ required: true });
 
 const isExpanded = ref(false);
 const showAdvanced = ref(false);
-const newPrompt = ref("");
 
 const outputDirName = computed(() => {
   const d = settings.value.outputDir;
@@ -59,16 +89,6 @@ const imgszLabel = computed(() => {
   return `${settings.value.imgsz}px`;
 });
 
-function addPrompt() {
-  if (newPrompt.value.trim()) {
-    settings.value.searchPrompts.push(newPrompt.value.trim());
-    newPrompt.value = "";
-  }
-}
-
-function removePrompt(index: number) {
-  settings.value.searchPrompts.splice(index, 1);
-}
 </script>
 
 <template>
@@ -79,35 +99,37 @@ function removePrompt(index: number) {
     </button>
 
     <div v-if="isExpanded" class="settings-content">
-      <!-- Custom Search Prompts (most important - first) -->
+      <!-- Structured search filters (fixed choices — most important, first) -->
       <div class="setting-row">
         <label>
-          <span class="label-text">Τι ψάχνετε στο βίντεο;</span>
+          <span class="label-text">Φίλτρα αναζήτησης</span>
         </label>
         <p class="setting-hint">
           Η ανάλυση εντοπίζει πάντα ανθρώπους και οχήματα όλων των τύπων.
-          Ό,τι γράψετε εδώ ΔΕΝ αλλάζει την ανίχνευση — επισημαίνει στα
-          αποτελέσματα όσα ταιριάζουν (π.χ. «λευκό αυτοκίνητο», «άτομο με
-          κόκκινη μπλούζα»). Ελληνικά ή αγγλικά.
+          Τα φίλτρα ΔΕΝ αλλάζουν την ανίχνευση — επισημαίνουν στην αναφορά
+          όσα ταιριάζουν στα κριτήρια που επιλέγετε.
         </p>
-        <div class="prompts-input">
-          <input
-            type="text"
-            v-model="newPrompt"
-            placeholder="π.χ. λευκό αυτοκίνητο, σκύλος, ποδήλατο"
-            @keyup.enter="addPrompt"
-          />
-          <button class="secondary" @click="addPrompt">Προσθήκη</button>
-        </div>
-        <div v-if="settings.searchPrompts.length > 0" class="prompts-list">
-          <span
-            v-for="(prompt, index) in settings.searchPrompts"
-            :key="index"
-            class="prompt-tag"
+        <div class="chip-row">
+          <button
+            v-for="t in FILTER_TYPES"
+            :key="t.value"
+            class="chip"
+            :class="{ on: settings.filterTypes.includes(t.value) }"
+            @click="toggleIn(settings.filterTypes, t.value)"
           >
-            {{ prompt }}
-            <button @click="removePrompt(index)">×</button>
-          </span>
+            {{ t.label }}
+          </button>
+        </div>
+        <div class="chip-row">
+          <button
+            v-for="c in FILTER_COLORS"
+            :key="c.value"
+            class="chip"
+            :class="{ on: settings.filterColors.includes(c.value) }"
+            @click="toggleIn(settings.filterColors, c.value)"
+          >
+            <i :style="{ background: c.css }"></i>{{ c.value }}
+          </button>
         </div>
       </div>
 
@@ -321,42 +343,37 @@ select {
   font-size: 0.9rem;
 }
 
-.prompts-input {
-  display: flex;
-  gap: 8px;
-}
-
-.prompts-input input {
-  flex: 1;
-}
-
-.prompts-list {
+.chip-row {
   display: flex;
   flex-wrap: wrap;
   gap: 8px;
-  margin-top: 8px;
+  margin-top: 4px;
 }
 
-.prompt-tag {
+.chip {
   display: inline-flex;
   align-items: center;
   gap: 6px;
-  padding: 4px 10px;
+  padding: 5px 12px;
+  border-radius: 18px;
+  font-size: 0.82rem;
   background: var(--bg-secondary);
-  border-radius: 20px;
-  font-size: 0.85rem;
-}
-
-.prompt-tag button {
-  background: transparent;
   color: var(--text-secondary);
-  padding: 0;
-  font-size: 1rem;
-  line-height: 1;
+  border: 1px solid var(--border);
 }
 
-.prompt-tag button:hover {
-  color: var(--accent);
+.chip i {
+  width: 11px;
+  height: 11px;
+  border-radius: 50%;
+  display: inline-block;
+  border: 1px solid rgba(255, 255, 255, 0.35);
+}
+
+.chip.on {
+  background: rgba(79, 140, 255, 0.18);
+  color: var(--text-primary);
+  border-color: var(--accent);
 }
 
 .switch-row {

@@ -1,121 +1,67 @@
-"""Stage-2 prompt filtering — the user-designed architecture, completed.
+"""Structured result filters — user decision: free text is ABOLISHED.
 
-Detection ALWAYS runs closed-set (people + vehicles, yolo26l: fastest AND
-most stable tracking). Free-text prompts are applied to the RESULTS:
-
-  1. Structured path (deterministic, preferred): the prompt is parsed for a
-     class hint and color words — "λευκό αυτοκίνητο" matches tracks with
-     vehicle class + attrs.color == λευκό, computed by attributes.py.
-  2. Semantic path (fallback for anything else — "αμάξι με σχάρα οροφής"):
-     cosine of the track's visual-prompt embedding (already computed for
-     stitching) against the text embedding of the prompt, using the same
-     YOLOE-nano text encoder. RELATIVE ranking (within 90% of the best
-     candidate) — the raw score scale is not calibrated, ranking is robust.
-
-Matched tracks are ANNOTATED, never dropped: an investigative tool must not
-hide objects — the report highlights matches and keeps everything visible.
+The investigator picks from FIXED, reliable options — specific colors and
+specific vehicle/person types — and the filters are applied to the results
+deterministically (detector class + computed color attributes). No semantic
+guessing, no uncalibrated similarity scores, nothing that can silently
+mis-fire. Matches are ANNOTATED, never hidden.
 """
 
-import numpy as np
+# Canonical color names = attributes.py vocabulary.
+FILTER_COLORS = ['λευκό', 'μαύρο', 'γκρι/ασημί', 'κόκκινο', 'μπλε', 'γαλάζιο',
+                 'πράσινο', 'κίτρινο', 'πορτοκαλί', 'καφέ', 'μωβ', 'ροζ']
 
-# Color vocabulary → attributes.py color names (Greek + English prompts).
-COLOR_WORDS = {
-    'λευκό': 'λευκό', 'λευκη': 'λευκό', 'λευκός': 'λευκό', 'ασπρο': 'λευκό',
-    'άσπρο': 'λευκό', 'white': 'λευκό',
-    'μαύρο': 'μαύρο', 'μαυρη': 'μαύρο', 'μαύρος': 'μαύρο', 'black': 'μαύρο',
-    'γκρι': 'γκρι/ασημί', 'ασημί': 'γκρι/ασημί', 'ασημι': 'γκρι/ασημί',
-    'gray': 'γκρι/ασημί', 'grey': 'γκρι/ασημί', 'silver': 'γκρι/ασημί',
-    'κόκκινο': 'κόκκινο', 'κοκκινο': 'κόκκινο', 'red': 'κόκκινο',
-    'μπλε': 'μπλε', 'blue': 'μπλε', 'γαλάζιο': 'γαλάζιο',
-    'πράσινο': 'πράσινο', 'πρασινο': 'πράσινο', 'green': 'πράσινο',
-    'κίτρινο': 'κίτρινο', 'yellow': 'κίτρινο',
-    'πορτοκαλί': 'πορτοκαλί', 'orange': 'πορτοκαλί',
-    'καφέ': 'καφέ', 'brown': 'καφέ', 'μωβ': 'μωβ', 'purple': 'μωβ',
-    'ροζ': 'ροζ', 'pink': 'ροζ',
+# Selectable types → detector class names (closed-set COCO subset).
+TYPE_MAP = {
+    'car': 'car', 'αυτοκίνητο': 'car',
+    'motorcycle': 'motorcycle', 'μοτοσικλέτα': 'motorcycle',
+    'truck': 'truck', 'φορτηγό': 'truck',
+    'bus': 'bus', 'λεωφορείο': 'bus',
+    'bicycle': 'bicycle', 'ποδήλατο': 'bicycle',
+    'person': 'person', 'άτομο': 'person',
 }
+TYPE_LABEL_EL = {'car': 'αυτοκίνητο', 'motorcycle': 'μοτοσικλέτα',
+                 'truck': 'φορτηγό', 'bus': 'λεωφορείο',
+                 'bicycle': 'ποδήλατο', 'person': 'άτομο'}
 
 
-def parse_prompt(prompt: str, vehicle_keywords, person_keywords) -> dict:
-    low = prompt.lower()
-    colors = sorted({v for w, v in COLOR_WORDS.items() if w in low})
-    return {
-        'prompt': prompt,
-        'colors': colors,
-        'wants_vehicle': any(k in low for k in vehicle_keywords),
-        'wants_person': any(k in low for k in person_keywords),
-    }
-
-
-def structured_match(track: dict, parsed: dict,
-                     vehicle_keywords, person_keywords) -> bool | None:
-    """True/False when the prompt is decidable from class + color attributes;
-    None when it needs the semantic path."""
-    cls = track['class'].lower()
-    is_vehicle = any(k in cls for k in vehicle_keywords)
-    is_person = any(k in cls for k in person_keywords)
-    if parsed['wants_vehicle'] and not is_vehicle:
-        return False
-    if parsed['wants_person'] and not is_person:
-        return False
-    if not parsed['colors']:
-        # Class-only prompt ("αυτοκίνητο") → decided purely by class.
-        if parsed['wants_vehicle'] or parsed['wants_person']:
-            return True
-        return None
+def _track_colors(track: dict) -> set:
     attrs = track.get('attrs') or {}
-    track_colors = set()
+    colors = set()
     if attrs.get('color'):
-        track_colors.add(attrs['color'])
+        colors.add(attrs['color'])
     for info in (attrs.get('clothing') or {}).values():
-        track_colors.add(info['color'])
-    if not track_colors:
-        return None  # no attribute evidence — let semantics decide
-    return any(c in track_colors for c in parsed['colors'])
+        colors.add(info['color'])
+    return colors
 
 
-def _text_embedding(prompt: str, embed_model_path: str) -> np.ndarray | None:
-    try:
-        from ultralytics import YOLO
-        yolo = YOLO(embed_model_path)
-        tpe = yolo.get_text_pe([prompt])
-        v = tpe.reshape(-1).float().cpu().numpy()
-        n = np.linalg.norm(v)
-        return v / n if n > 0 else v
-    except Exception:  # noqa: BLE001 — semantic path is best-effort
-        return None
+def apply_filters(tracks: dict, colors: list | None, types: list | None,
+                  log=None) -> None:
+    """Annotate tracks matching the active criteria (in place).
 
-
-def apply_prompts(tracks: dict, prompts: list, embed_model_path: str,
-                  vehicle_keywords, person_keywords, log=None):
-    """Annotate tracks in place: t['prompt_matches'] = [prompt, ...]."""
-    for prompt in prompts:
-        parsed = parse_prompt(prompt, vehicle_keywords, person_keywords)
-        undecided = []
-        for tid, t in tracks.items():
-            verdict = structured_match(t, parsed, vehicle_keywords,
-                                       person_keywords)
-            if verdict is True:
-                t.setdefault('prompt_matches', []).append(prompt)
-            elif verdict is None:
-                undecided.append(tid)
-
-        if undecided:
-            tpe = _text_embedding(prompt, embed_model_path)
-            scored = []
-            if tpe is not None:
-                for tid in undecided:
-                    vpe = tracks[tid].get('_emb_vpe')
-                    if vpe is not None and vpe.shape == tpe.shape:
-                        scored.append((float(np.dot(vpe, tpe)), tid))
-            if scored:
-                best = max(s for s, _ in scored)
-                # Relative gate: the raw vpe·tpe scale is uncalibrated, but
-                # ranking is stable — accept candidates within 90% of the
-                # best (and require a sane positive best).
-                for s, tid in scored:
-                    if best > 0.05 and s >= 0.9 * best:
-                        tracks[tid].setdefault('prompt_matches', []).append(prompt)
-        if log:
-            n = sum(1 for t in tracks.values()
-                    if prompt in (t.get('prompt_matches') or []))
-            log(f'Prompt "{prompt}": {n}/{len(tracks)} objects match')
+    Semantics: a track matches when its TYPE is among the selected types
+    (or none selected) AND one of its COLORS is among the selected colors
+    (or none selected). Matched tracks get 'prompt_matches' labels — the
+    report renders them as 🔍 chips (field name kept for report compat)."""
+    want_types = {TYPE_MAP[t.lower()] for t in (types or [])
+                  if t.lower() in TYPE_MAP}
+    want_colors = {c for c in (colors or []) if c in FILTER_COLORS}
+    if not want_types and not want_colors:
+        return
+    matched = 0
+    for t in tracks.values():
+        cls = t['class'].lower()
+        type_ok = not want_types or cls in want_types
+        track_colors = _track_colors(t)
+        color_ok = not want_colors or bool(track_colors & want_colors)
+        if type_ok and color_ok:
+            labels = []
+            if want_colors:
+                labels += sorted(track_colors & want_colors)
+            if want_types and cls in want_types:
+                labels.append(TYPE_LABEL_EL.get(cls, cls))
+            t['prompt_matches'] = [' '.join(labels) or 'κριτήρια']
+            matched += 1
+    if log:
+        log(f'Filters (colors={sorted(want_colors)}, '
+            f'types={sorted(want_types)}): {matched}/{len(tracks)} match')

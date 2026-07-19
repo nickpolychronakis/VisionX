@@ -140,30 +140,19 @@ def run_attributes(tracks: dict, cfg: dict, json_progress: bool):
 
 
 def run_prompt_filter(tracks: dict, cfg: dict, args, json_progress: bool):
-    """Stage-2 free-text filtering on the results (see prompt_filter.py).
-    Requires the stitching embeddings for the semantic path; computes them
-    if the stitching pass was skipped."""
-    search = getattr(args, 'search', None)
-    if not search or not tracks:
+    """Structured result filters (see prompt_filter.py) — fixed color/type
+    choices only; free text was deliberately removed."""
+    colors = getattr(args, 'filter_color', None)
+    types = getattr(args, 'filter_type', None)
+    if not (colors or types) or not tracks:
         return
     try:
         import prompt_filter
-        import stitch as _stitch
-        if not any(t.get('_emb_vpe') is not None for t in tracks.values()):
-            embed_path = resolve_model_path(
-                cfg.get('stitch_embed_model', 'yoloe-26n-seg.pt'),
-                cfg.get('_data_dir'), cfg.get('_resource_dir'))
-            _stitch.compute_embeddings(tracks, embed_path, log=log_stderr)
-        embed_path = resolve_model_path(
-            cfg.get('stitch_embed_model', 'yoloe-26n-seg.pt'),
-            cfg.get('_data_dir'), cfg.get('_resource_dir'))
         if json_progress:
             emit_json('status', message='Φιλτράρισμα αποτελεσμάτων με τα κριτήρια...')
-        prompt_filter.apply_prompts(tracks, search, embed_path,
-                                    VEHICLE_KEYWORDS, PERSON_KEYWORDS,
-                                    log=log_stderr)
+        prompt_filter.apply_filters(tracks, colors, types, log=log_stderr)
     except Exception as e:  # noqa: BLE001
-        log_stderr(f'Prompt filtering failed ({e})')
+        log_stderr(f'Filtering failed ({e})')
 
 
 def run_auto_plates(tracks: dict, cfg: dict, json_progress: bool,
@@ -973,7 +962,13 @@ Examples:
     )
     parser.add_argument('source', nargs='*', help='Video file(s)')
     parser.add_argument('--dir', help='Process all videos in directory')
-    parser.add_argument('--search', nargs='+', help='Custom prompts')
+    parser.add_argument('--filter-color', nargs='+',
+                        help='Highlight results with these colors '
+                             '(fixed vocabulary, e.g. λευκό μαύρο κόκκινο)')
+    parser.add_argument('--filter-type', nargs='+',
+                        help='Highlight results of these types '
+                             '(car/motorcycle/truck/bus/bicycle/person, '
+                             'Greek names accepted)')
     parser.add_argument('--model', help='Model file')
     parser.add_argument('--conf', type=float, help='Confidence threshold')
     parser.add_argument('--output', '-o', help='Output directory')
@@ -1093,25 +1088,25 @@ Examples:
         return
 
     # Two-stage architecture (user-designed, see BENCHMARKS.md): detection
-    # ALWAYS runs closed-set yolo26l on the fixed scope (people + vehicles) —
-    # best tracking stability at ~half the old default's latency. Free-text
-    # prompts do NOT change the detector: they are applied at stage 2 as
-    # filters on the results (class/color attributes deterministically,
-    # semantic embedding ranking otherwise — see prompt_filter.py). The only
-    # way to run open-vocabulary DETECTION (objects outside the fixed scope)
-    # is an explicit --model yoloe-*.
-    if args.model:
-        model_path = args.model
-        closed_mode = 'yoloe' not in Path(args.model).name.lower()
-    else:
+    # ALWAYS runs closed-set on the fixed scope (people + vehicles) — best
+    # tracking stability at ~half the old default's latency. Search criteria
+    # are STRUCTURED filters (specific colors/types) applied on the results;
+    # free text and open-vocabulary detection were deliberately REMOVED
+    # (user decision: an investigator never searches for a dog, and fixed
+    # reliable choices beat free text that can silently misfire). YOLOE
+    # checkpoints remain internal tools only (stitching embeddings).
+    model_path = args.model or cfg.get('model_closed', 'yolo26l.pt')
+    if 'yoloe' in Path(model_path).name.lower():
+        log_stderr(f'YOLOE detection is no longer supported as the main model '
+                   f'({Path(model_path).name}) — using '
+                   f'{cfg.get("model_closed", "yolo26l.pt")} instead')
         model_path = cfg.get('model_closed', 'yolo26l.pt')
-        closed_mode = True
-    prompts = args.search or cfg['prompts']
+    closed_mode = True
+    prompts = cfg['prompts']  # legacy field, unused by the closed detector
     # COCO ids for the fixed scope: person bicycle car motorcycle bus truck
     cfg['_closed_classes'] = [0, 1, 2, 3, 5, 7] if closed_mode else None
     json_progress = getattr(args, 'json_progress', False)
-    log_stderr(f'Model selection: {"closed-set " + Path(model_path).name if closed_mode else "open-vocabulary " + Path(model_path).name} '
-               f'(custom prompts: {bool(args.search)})')
+    log_stderr(f'Model selection: closed-set {Path(model_path).name}')
 
     # Resolve model path: check data dir (downloaded), then resource dir (bundled), then CWD
     if not Path(model_path).is_absolute():
@@ -1203,10 +1198,11 @@ Examples:
             emit_json('status', message='Προθέρμανση GPU...')
         warmup_gpu(yolo, 'cuda', imgsz_val)
 
-    scope_label = ('άνθρωποι + οχήματα (όλοι οι τύποι)' if closed_mode
-                   else ', '.join(prompts))
-    if closed_mode and args.search:
-        scope_label += f' — φίλτρο αποτελεσμάτων: {", ".join(args.search)}'
+    scope_label = 'άνθρωποι + οχήματα (όλοι οι τύποι)'
+    active_filters = (getattr(args, 'filter_color', None) or []) + \
+                     (getattr(args, 'filter_type', None) or [])
+    if active_filters:
+        scope_label += f' — φίλτρα: {", ".join(active_filters)}'
     if json_progress:
         emit_json('status', message=f'Αναζήτηση: {scope_label}')
         emit_json('status', message=f'{len(video_files)} βίντεο προς ανάλυση')

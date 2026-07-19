@@ -37,7 +37,11 @@ struct ProcessConfig {
     imgsz: u32,
     parallel: u32,
     output_dir: String,
-    search_prompts: Vec<String>,
+    // Structured result filters (free text was removed by design).
+    #[serde(default)]
+    filter_colors: Vec<String>,
+    #[serde(default)]
+    filter_types: Vec<String>,
     // Phase A-Γ toggles. #[serde(default)] so older frontends (and any
     // cached settings) that omit them keep the analysis features ON.
     #[serde(default = "default_true")]
@@ -225,9 +229,13 @@ async fn process_videos(
         args.push("--no-faces".to_string());
     }
 
-    for prompt in &config.search_prompts {
-        args.push("--search".to_string());
-        args.push(prompt.clone());
+    if !config.filter_colors.is_empty() {
+        args.push("--filter-color".to_string());
+        args.extend(config.filter_colors.iter().cloned());
+    }
+    if !config.filter_types.is_empty() {
+        args.push("--filter-type".to_string());
+        args.extend(config.filter_types.iter().cloned());
     }
 
     args.extend(files.iter().cloned());
