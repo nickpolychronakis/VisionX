@@ -6,8 +6,9 @@
    changes propagate everywhere from this file. */
 
 :root {
-  /* Light theme (user request: white background instead of the dark/purple
-     base). Cards keep their colour identities; text flips to dark ink. */
+  /* Light theme (default — user preference). Cards keep their colour
+     identities; text is dark ink. --ink-rgb feeds every "contrast against
+     the surface" alpha (hovers, scrollbars) so both themes stay legible. */
   --bg-primary: #f4f6fb;
   --bg-secondary: #ffffff;
   --bg-card: rgba(255, 255, 255, 0.55);
@@ -20,6 +21,28 @@
   --border: rgba(23, 32, 54, 0.12);
   --shadow: 0 8px 24px rgba(30, 41, 70, 0.10);
   --radius: 14px;
+  --ink-rgb: 23, 32, 54;
+  --plate-fg: #8a5d00;
+  --plate-border: rgba(202, 138, 4, 0.45);
+}
+
+/* Dark theme — the pre-white palette, kept for night-time review of dark
+   footage. Toggled by the 🌙/☀️ header button (App.vue sets data-theme). */
+:root[data-theme="dark"] {
+  --bg-primary: #151926;
+  --bg-secondary: #1e2432;
+  --bg-card: rgba(255, 255, 255, 0.06);
+  --text-primary: #f2f4f8;
+  --text-secondary: #a8b2c3;
+  --accent: #4f8cff;
+  --accent-hover: #6ba3ff;
+  --success: #34d399;
+  --danger: #ef4466;
+  --border: rgba(255, 255, 255, 0.12);
+  --shadow: 0 8px 24px rgba(0, 0, 0, 0.35);
+  --ink-rgb: 255, 255, 255;
+  --plate-fg: #ffd699;
+  --plate-border: rgba(255, 184, 76, 0.38);
 }
 
 * {
@@ -54,6 +77,14 @@ html {
     radial-gradient(800px 500px at 95% 12%, rgba(167, 122, 255, 0.08), transparent 60%),
     radial-gradient(900px 600px at 55% 110%, rgba(45, 212, 191, 0.07), transparent 60%),
     rgb(244 246 251 / 0.80);
+}
+
+html[data-theme="dark"] {
+  background:
+    radial-gradient(900px 480px at 15% -5%, rgba(79, 140, 255, 0.16), transparent 60%),
+    radial-gradient(800px 500px at 95% 12%, rgba(167, 122, 255, 0.13), transparent 60%),
+    radial-gradient(900px 600px at 55% 110%, rgba(45, 212, 191, 0.10), transparent 60%),
+    rgb(21 25 36 / 0.82);
 }
 
 body, #app {
@@ -119,8 +150,8 @@ button.secondary {
 }
 
 button.secondary:hover {
-  border-color: rgba(23, 32, 54, 0.28);
-  background: rgba(23, 32, 54, 0.05);
+  border-color: rgba(var(--ink-rgb), 0.28);
+  background: rgba(var(--ink-rgb), 0.06);
   transform: translateY(-1px);
 }
 
@@ -183,8 +214,8 @@ input:focus, select:focus {
    identity so it doesn't read as a generic secondary button. */
 button.plate-btn {
   background: linear-gradient(180deg, rgba(255, 184, 76, 0.22), rgba(255, 184, 76, 0.09));
-  border: 1px solid rgba(202, 138, 4, 0.45);
-  color: #8a5d00;
+  border: 1px solid var(--plate-border);
+  color: var(--plate-fg);
 }
 
 button.plate-btn:hover {
@@ -199,11 +230,11 @@ button.plate-btn:hover {
   height: 8px;
 }
 ::-webkit-scrollbar-thumb {
-  background: rgba(23, 32, 54, 0.18);
+  background: rgba(var(--ink-rgb), 0.18);
   border-radius: 4px;
 }
 ::-webkit-scrollbar-thumb:hover {
-  background: rgba(23, 32, 54, 0.30);
+  background: rgba(var(--ink-rgb), 0.30);
 }
 ::-webkit-scrollbar-track {
   background: transparent;

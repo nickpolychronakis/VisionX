@@ -16,6 +16,26 @@ type AppView = "loading" | "setup" | "select" | "processing" | "results";
 const currentView = ref<AppView>("loading");
 const showAbout = ref(false);
 
+// Theme — light is the default (user preference); dark is kept for
+// night-time review of dark footage. Stored separately from settings so a
+// future settings-reset never flips the theme under the user.
+const THEME_KEY = "visionx.theme";
+const theme = ref<"light" | "dark">(
+  localStorage.getItem(THEME_KEY) === "dark" ? "dark" : "light",
+);
+watch(
+  theme,
+  (t) => {
+    // styles.css switches every variable off this attribute
+    document.documentElement.dataset.theme = t;
+    localStorage.setItem(THEME_KEY, t);
+  },
+  { immediate: true },
+);
+function toggleTheme() {
+  theme.value = theme.value === "light" ? "dark" : "light";
+}
+
 // Selected files
 const selectedFiles = ref<string[]>([]);
 
@@ -271,14 +291,22 @@ function startNew() {
         <h1>VisionX</h1>
         <span class="subtitle">Ανίχνευση & Παρακολούθηση Αντικειμένων σε Βίντεο</span>
       </div>
-      <button
-        v-if="currentView !== 'setup' && !isProcessing"
-        class="info-btn"
-        @click="showAbout = true"
-        title="Σχετικά με το VisionX"
-      >
-        ℹ️
-      </button>
+      <div class="header-actions" v-if="currentView !== 'setup' && !isProcessing">
+        <button
+          class="info-btn theme-btn"
+          @click="toggleTheme"
+          :title="theme === 'light' ? 'Σκούρο θέμα' : 'Φωτεινό θέμα'"
+        >
+          {{ theme === "light" ? "🌙" : "☀️" }}
+        </button>
+        <button
+          class="info-btn"
+          @click="showAbout = true"
+          title="Σχετικά με το VisionX"
+        >
+          ℹ️
+        </button>
+      </div>
     </header>
 
     <Transition name="modal">
@@ -418,11 +446,16 @@ function startNew() {
   font-size: 0.9rem;
 }
 
-.info-btn {
+.header-actions {
   position: absolute;
   right: 0;
   top: 50%;
   transform: translateY(-50%);
+  display: flex;
+  gap: 8px;
+}
+
+.info-btn {
   background: transparent;
   border: 1px solid var(--border);
   border-radius: 50%;
