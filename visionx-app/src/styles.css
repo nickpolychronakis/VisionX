@@ -1,22 +1,24 @@
 /* VisionX global theme — 2026 refresh.
-   Goal (user feedback): "πιο σύγχρονο και πιο ελαφρύ" — keep the dark base
-   (night-friendly for reviewing footage) but trade the heavy navy blocks
-   and hard red for an airy slate surface: translucent "glass" cards, hairline
-   borders, soft shadows, and a calm blue accent. All components consume
-   these variables, so the refresh propagates everywhere. */
+   Goal (user feedback, iterated): "πιο σύγχρονο και πιο ελαφρύ" → brighter
+   with colour-identity cards → white background. The result: white glass
+   surfaces over native vibrancy, dark-ink text, and each workspace card
+   carrying its own hue. All components consume these variables, so theme
+   changes propagate everywhere from this file. */
 
 :root {
-  --bg-primary: #151926;
-  --bg-secondary: #1e2432;
-  --bg-card: rgba(255, 255, 255, 0.06);
-  --text-primary: #f2f4f8;
-  --text-secondary: #a8b2c3;
-  --accent: #4f8cff;
-  --accent-hover: #6ba3ff;
-  --success: #34d399;
-  --danger: #ef4466;
-  --border: rgba(255, 255, 255, 0.12);
-  --shadow: 0 8px 24px rgba(0, 0, 0, 0.35);
+  /* Light theme (user request: white background instead of the dark/purple
+     base). Cards keep their colour identities; text flips to dark ink. */
+  --bg-primary: #f4f6fb;
+  --bg-secondary: #ffffff;
+  --bg-card: rgba(255, 255, 255, 0.55);
+  --text-primary: #1d2433;
+  --text-secondary: #5b657a;
+  --accent: #3b76e8;
+  --accent-hover: #5c8ff0;
+  --success: #0f9d6e;
+  --danger: #d92b4b;
+  --border: rgba(23, 32, 54, 0.12);
+  --shadow: 0 8px 24px rgba(30, 41, 70, 0.10);
   --radius: 14px;
 }
 
@@ -44,14 +46,14 @@ html, body, #app {
    makes the window essentially opaque and the native vibrancy invisible
    (verified visually while capturing UI screenshots). */
 html {
-  /* "Aurora" wash: three soft colour pools (blue / violet / teal) over a
-     lighter tint than before — the user asked for a brighter, more colourful
-     surface, and the lower alpha also lets more desktop vibrancy through. */
+  /* White glass base with a faint aurora wash — the colour pools stay but at
+     low alpha so the surface reads white, not purple. The 0.80 alpha lets the
+     desktop vibrancy glow through as pastel. */
   background:
-    radial-gradient(900px 480px at 15% -5%, rgba(79, 140, 255, 0.16), transparent 60%),
-    radial-gradient(800px 500px at 95% 12%, rgba(167, 122, 255, 0.13), transparent 60%),
-    radial-gradient(900px 600px at 55% 110%, rgba(45, 212, 191, 0.10), transparent 60%),
-    rgb(21 25 36 / 0.82);
+    radial-gradient(900px 480px at 15% -5%, rgba(79, 140, 255, 0.10), transparent 60%),
+    radial-gradient(800px 500px at 95% 12%, rgba(167, 122, 255, 0.08), transparent 60%),
+    radial-gradient(900px 600px at 55% 110%, rgba(45, 212, 191, 0.07), transparent 60%),
+    rgb(244 246 251 / 0.80);
 }
 
 body, #app {
@@ -117,8 +119,8 @@ button.secondary {
 }
 
 button.secondary:hover {
-  border-color: rgba(255, 255, 255, 0.22);
-  background: rgba(255, 255, 255, 0.07);
+  border-color: rgba(23, 32, 54, 0.28);
+  background: rgba(23, 32, 54, 0.05);
   transform: translateY(-1px);
 }
 
@@ -173,15 +175,16 @@ input:focus, select:focus {
 
 .card[class*="card-"] > h3,
 .card[class*="card-"] > .toggle-btn {
-  color: rgb(var(--card-hue));
+  /* Pure hue lacks contrast on the white surface — mix 60/40 with ink */
+  color: color-mix(in srgb, rgb(var(--card-hue)) 60%, var(--text-primary));
 }
 
 /* The plate tool is its own mini-feature — give its launcher the amber
    identity so it doesn't read as a generic secondary button. */
 button.plate-btn {
-  background: linear-gradient(180deg, rgba(255, 184, 76, 0.18), rgba(255, 184, 76, 0.07));
-  border: 1px solid rgba(255, 184, 76, 0.38);
-  color: #ffd699;
+  background: linear-gradient(180deg, rgba(255, 184, 76, 0.22), rgba(255, 184, 76, 0.09));
+  border: 1px solid rgba(202, 138, 4, 0.45);
+  color: #8a5d00;
 }
 
 button.plate-btn:hover {
@@ -196,11 +199,11 @@ button.plate-btn:hover {
   height: 8px;
 }
 ::-webkit-scrollbar-thumb {
-  background: rgba(255, 255, 255, 0.14);
+  background: rgba(23, 32, 54, 0.18);
   border-radius: 4px;
 }
 ::-webkit-scrollbar-thumb:hover {
-  background: rgba(255, 255, 255, 0.24);
+  background: rgba(23, 32, 54, 0.30);
 }
 ::-webkit-scrollbar-track {
   background: transparent;
