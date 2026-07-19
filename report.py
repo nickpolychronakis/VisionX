@@ -3,6 +3,11 @@
 import html as html_mod
 from pathlib import Path
 
+try:
+    from attributes import CSS_COLOR
+except Exception:  # noqa: BLE001 — report must render even without the module
+    CSS_COLOR = {}
+
 
 def format_timestamp(seconds: float) -> str:
     """Convert seconds to HH:MM:SS format"""
@@ -103,6 +108,24 @@ def generate_report(tracks: dict, output_dir: str, video_name: str, video_path: 
                                f'for this vehicle" '
                                f'onclick="copyTimestamp(\'{cmd}\')">&#8981;</span>')
 
+        # Color attribute chips (vehicle body / person clothing) — computed
+        # on the results, classical HSV voting (see attributes.py).
+        attrs_html = ''
+        a = track.get('attrs') or {}
+
+        def _color_chip(label, name):
+            dot = CSS_COLOR.get(name, '#888')
+            return (f'<span class="attr"><i style="background:{dot}"></i>'
+                    f'{html_mod.escape(label + name)}</span>')
+        if a.get('color'):
+            attrs_html += _color_chip('', a['color'])
+        for part, label in (('upper', 'πάνω: '), ('lower', 'κάτω: ')):
+            info = (a.get('clothing') or {}).get(part)
+            if info:
+                attrs_html += _color_chip(label, info['color'])
+        if attrs_html:
+            attrs_html = f'<div class="attrs">{attrs_html}</div>'
+
         # Best face shots (person tracks): extraction only, for human review.
         faces_html = ''
         for k, face in enumerate(track.get('faces') or []):
@@ -133,7 +156,7 @@ def generate_report(tracks: dict, output_dir: str, video_name: str, video_path: 
             </div>
             <div class="info">
                 <div class="title">{title_esc} #{track_id} {badges}</div>
-                {plate_html}{faces_html}
+                {attrs_html}{plate_html}{faces_html}
                 <div class="confidence">Confidence: {track['confidence']:.0%}</div>
                 <div class="meta">
                     <span class="direction" title="Direction">{direction}</span>
@@ -269,6 +292,16 @@ def generate_report(tracks: dict, output_dir: str, video_name: str, video_path: 
             border-radius: 6px; border: 2px solid #7dd3fc;
         }}
         .face:hover {{ opacity: 0.85; }}
+        .attrs {{ display: flex; gap: 8px; margin: 2px 0 4px; flex-wrap: wrap; }}
+        .attr {{
+            display: inline-flex; align-items: center; gap: 5px;
+            font-size: 0.8em; color: #cbd5e1; background: #10192e;
+            border-radius: 10px; padding: 2px 9px;
+        }}
+        .attr i {{
+            width: 10px; height: 10px; border-radius: 50%;
+            display: inline-block; border: 1px solid rgba(255,255,255,0.35);
+        }}
         /* For persons, show top (face) instead of center */
         .card[data-class="person"] .thumbnail {{
             object-position: top;

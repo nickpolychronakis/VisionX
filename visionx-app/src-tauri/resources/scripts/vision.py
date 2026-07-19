@@ -53,6 +53,11 @@ DEFAULT_CONFIG = {
     'plates': True,
     # Best face shots per person track — extraction ONLY, no recognition.
     'faces': True,
+    # Color attributes computed on the results (vehicles + clothing).
+    'attributes': True,
+    # Closed-set detector used when no custom prompts are given (see
+    # BENCHMARKS.md: best tracking stability at half the old default's cost).
+    'model_closed': 'yolo26l.pt',
 }
 
 # Which track classes count as vehicles for the auto-plate pass. Prompts are
@@ -100,6 +105,38 @@ def run_face_shots(tracks: dict, cfg: dict, json_progress: bool):
                            'score': round(f['score'], 3)} for f in faces]
             found += 1
     log_stderr(f'Face shots: faces found on {found}/{len(persons)} persons')
+
+
+def run_attributes(tracks: dict, cfg: dict, json_progress: bool):
+    """Color attributes on the results (user-designed second stage): vehicle
+    body color + person clothing colors, from the snapshot crops."""
+    if not cfg.get('attributes', True):
+        return
+    try:
+        import attributes as attr_mod
+    except Exception as e:  # noqa: BLE001
+        log_stderr(f'Attributes unavailable ({e})')
+        return
+    for t in tracks.values():
+        snaps = t.get('snapshots') or []
+        if not snaps:
+            continue
+        crops = [cv2.imdecode(np.frombuffer(s['jpeg'], np.uint8),
+                              cv2.IMREAD_COLOR) for s in snaps]
+        crops = [c for c in crops if c is not None]
+        try:
+            cls = t['class'].lower()
+            if any(k in cls for k in VEHICLE_KEYWORDS):
+                res = attr_mod.vehicle_color(crops)
+                if res:
+                    t['attrs'] = {'color': res[0], 'color_conf': res[1]}
+            elif any(k in cls for k in PERSON_KEYWORDS):
+                clothing = attr_mod.person_clothing(crops)
+                if clothing:
+                    t['attrs'] = {'clothing': {k: {'color': v[0], 'conf': v[1]}
+                                               for k, v in clothing.items()}}
+        except Exception as e:  # noqa: BLE001
+            log_stderr(f'Attribute extraction failed on a track ({e})')
 
 
 def run_auto_plates(tracks: dict, cfg: dict, json_progress: bool,
@@ -517,6 +554,8 @@ def process_video(source: str, yolo: YOLO, cfg: dict, args, video_index: int = 1
         verbose=False,
         tracker=tracker_path,
         max_det=300,
+        # Closed-set mode: restrict COCO classes to the fixed scope
+        classes=cfg.get('_closed_classes'),
     )
 
     # Track detections for report — shared collector (best-K snapshots +
@@ -602,6 +641,7 @@ def process_video(source: str, yolo: YOLO, cfg: dict, args, video_index: int = 1
     tracks = run_stitching(tracks, cfg, json_progress)
     run_auto_plates(tracks, cfg, json_progress, fps=fps, video_path=source)
     run_face_shots(tracks, cfg, json_progress)
+    run_attributes(tracks, cfg, json_progress)
 
     log_stderr(f'Processing complete: {source_path.name} — {n_raw} tracklets '
                f'-> {len(tracks)} objects, {frame_num} frames analyzed')
@@ -787,6 +827,7 @@ def process_video_chain(sources: list[str], yolo: YOLO, cfg: dict, args) -> str 
             verbose=False,
             tracker=tracker_path,
             max_det=300,
+            classes=cfg.get('_closed_classes'),
         )
 
         frame_in_video = 0
@@ -846,6 +887,7 @@ def process_video_chain(sources: list[str], yolo: YOLO, cfg: dict, args) -> str 
     tracks = run_stitching(tracks, cfg, json_progress)
     run_auto_plates(tracks, cfg, json_progress)
     run_face_shots(tracks, cfg, json_progress)
+    run_attributes(tracks, cfg, json_progress)
     tracks = prepare_for_report(tracks)
     log_stderr(f'Chain complete: {n_raw} tracklets -> {len(tracks)} objects')
 
@@ -878,7 +920,8 @@ def _parallel_worker(worker_args: dict) -> str | None:
 
     # Each worker loads its own model instance
     yolo = YOLO(model_path)
-    if not using_optimized:
+    # Closed-set mode (cfg['_closed_classes'] set): plain YOLO26, no prompts.
+    if not using_optimized and cfg.get('_closed_classes') is None:
         yolo.set_classes(prompts)  # type: ignore[misc]
 
     report_path, _ = process_video(source, yolo, cfg, args,
@@ -1020,10 +1063,27 @@ Examples:
         parser.print_help()
         return
 
-    # Get settings for model loading
-    model_path = args.model or cfg['model']
+    # Automatic model selection (see BENCHMARKS.md, quality-first): without
+    # custom prompts the scope is FIXED (people + all vehicle types), where
+    # closed-set YOLO26 both tracks more stably (yoloe-26x produced the most
+    # fragmented tracks of all candidates) AND runs ~2x faster. Open-vocab
+    # YOLOE loads only when the user actually searches free text. User-driven
+    # design: attributes (color etc.) are computed AFTERWARDS on the results,
+    # not by widening the detector's vocabulary.
+    closed_mode = not args.search
+    if args.model:
+        model_path = args.model
+        closed_mode = 'yoloe' not in Path(args.model).name.lower()
+    elif closed_mode:
+        model_path = cfg.get('model_closed', 'yolo26l.pt')
+    else:
+        model_path = cfg['model']
     prompts = args.search or cfg['prompts']
+    # COCO ids for the fixed scope: person bicycle car motorcycle bus truck
+    cfg['_closed_classes'] = [0, 1, 2, 3, 5, 7] if closed_mode else None
     json_progress = getattr(args, 'json_progress', False)
+    log_stderr(f'Model selection: {"closed-set " + Path(model_path).name if closed_mode else "open-vocabulary " + Path(model_path).name} '
+               f'(custom prompts: {bool(args.search)})')
 
     # Resolve model path: check data dir (downloaded), then resource dir (bundled), then CWD
     if not Path(model_path).is_absolute():
@@ -1050,7 +1110,12 @@ Examples:
     # Platform-specific model optimization (one-time exports)
     using_optimized = False
 
-    if sys.platform == 'darwin':
+    if closed_mode:
+        # The export helpers bake YOLOE prompt embeddings — not applicable to
+        # plain YOLO26. PyTorch MPS/CUDA is already ~2x faster than the old
+        # default; CoreML/TensorRT export for YOLO26 is a follow-up.
+        log_stderr('Closed-set mode: using PyTorch runtime (no baked export)')
+    elif sys.platform == 'darwin':
         # macOS: CoreML for Neural Engine acceleration
         coreml_path = get_coreml_model_path(model_path)
         if coreml_path is None and data_dir:
@@ -1098,7 +1163,7 @@ Examples:
     log_stderr(f'  Optimized: {using_optimized}')
     yolo = YOLO(model_path)
     log_stderr(f'  Model loaded successfully')
-    if not using_optimized:
+    if not using_optimized and not closed_mode:
         if json_progress:
             emit_json('status', message='Προετοιμασία αναγνώρισης αντικειμένων...')
         yolo.set_classes(prompts)  # type: ignore[misc]  # Optimized models have classes baked in
@@ -1110,11 +1175,13 @@ Examples:
             emit_json('status', message='Προθέρμανση GPU...')
         warmup_gpu(yolo, 'cuda', imgsz_val)
 
+    scope_label = ('άνθρωποι + οχήματα (όλοι οι τύποι)' if closed_mode
+                   else ', '.join(prompts))
     if json_progress:
-        emit_json('status', message=f'Αναζήτηση: {", ".join(prompts)}')
+        emit_json('status', message=f'Αναζήτηση: {scope_label}')
         emit_json('status', message=f'{len(video_files)} βίντεο προς ανάλυση')
     else:
-        print(f'Detecting: {", ".join(prompts)}')
+        print(f'Detecting: {scope_label}')
         print(f'\nFound {len(video_files)} video(s) to process')
 
     # Process videos

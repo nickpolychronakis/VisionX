@@ -43,7 +43,8 @@
       "resources/scripts/plate_core.py": "scripts/plate_core.py",
       "resources/scripts/face_shots.py": "scripts/face_shots.py",
       "resources/scripts/cross_match.py": "scripts/cross_match.py",
-      "resources/scripts/match_report.py": "scripts/match_report.py"
+      "resources/scripts/match_report.py": "scripts/match_report.py",
+      "resources/scripts/attributes.py": "scripts/attributes.py"
     },
     "icon": [
       "icons/32x32.png",
