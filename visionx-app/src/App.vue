@@ -3,16 +3,18 @@ import { ref, computed, onMounted, onUnmounted, watch } from "vue";
 import { invoke } from "@tauri-apps/api/core";
 import { listen, UnlistenFn } from "@tauri-apps/api/event";
 import { open } from "@tauri-apps/plugin-dialog";
-import LandingPage from "./components/LandingPage.vue";
+import AboutModal from "./components/AboutModal.vue";
 import FileSelector from "./components/FileSelector.vue";
 import SettingsPanel from "./components/SettingsPanel.vue";
 import ProgressBar from "./components/ProgressBar.vue";
 import ReportViewer from "./components/ReportViewer.vue";
 import SetupWizard from "./components/SetupWizard.vue";
 
-// App state
-type AppView = "loading" | "setup" | "landing" | "select" | "processing" | "results";
+// App state — the app opens STRAIGHT into the workspace (2026 desktop UX:
+// no landing page; identity/version/updates live in the About modal).
+type AppView = "loading" | "setup" | "select" | "processing" | "results";
 const currentView = ref<AppView>("loading");
+const showAbout = ref(false);
 
 // Selected files
 const selectedFiles = ref<string[]>([]);
@@ -110,11 +112,7 @@ onMounted(async () => {
   // Check if setup is needed
   try {
     const status = await invoke<{ needs_setup: boolean }>("check_setup");
-    if (status.needs_setup) {
-      currentView.value = "setup";
-    } else {
-      currentView.value = "landing";
-    }
+    currentView.value = status.needs_setup ? "setup" : "select";
   } catch (e) {
     console.error("Failed to check setup:", e);
     currentView.value = "setup";
@@ -274,14 +272,18 @@ function startNew() {
         <span class="subtitle">Ανίχνευση & Παρακολούθηση Αντικειμένων σε Βίντεο</span>
       </div>
       <button
-        v-if="currentView !== 'landing' && currentView !== 'setup' && !isProcessing"
+        v-if="currentView !== 'setup' && !isProcessing"
         class="info-btn"
-        @click="currentView = 'landing'"
-        title="Πληροφορίες"
+        @click="showAbout = true"
+        title="Σχετικά με το VisionX"
       >
         ℹ️
       </button>
     </header>
+
+    <Transition name="modal">
+      <AboutModal v-if="showAbout" @close="showAbout = false" />
+    </Transition>
 
     <main class="main">
       <!-- Loading -->
@@ -292,7 +294,7 @@ function startNew() {
       <!-- Setup Wizard -->
       <SetupWizard
         v-else-if="currentView === 'setup'"
-        @complete="currentView = 'landing'"
+        @complete="currentView = 'select'"
       />
 
       <!-- Error Message -->
@@ -301,14 +303,9 @@ function startNew() {
         <button class="dismiss-btn" @click="processingError = null">×</button>
       </div>
 
-      <!-- Landing Page -->
-      <LandingPage
-        v-if="currentView === 'landing'"
-        @start="currentView = 'select'"
-      />
-
-      <!-- File Selection View -->
-      <div v-else-if="currentView === 'select'" class="view-select">
+      <!-- File Selection View (the workspace home) -->
+      <Transition name="view" mode="out-in">
+      <div v-if="currentView === 'select'" class="view-select" key="select">
         <FileSelector @files-selected="onFilesSelected" />
 
         <div v-if="selectedFiles.length > 0" class="selected-files card">
@@ -354,7 +351,7 @@ function startNew() {
       </div>
 
       <!-- Processing View -->
-      <div v-else-if="currentView === 'processing'" class="view-processing">
+      <div v-else-if="currentView === 'processing'" class="view-processing" key="processing">
         <ProgressBar
           :current-video="progress.currentVideo"
           :current-frame="progress.currentFrame"
@@ -370,7 +367,7 @@ function startNew() {
       </div>
 
       <!-- Results View -->
-      <div v-else-if="currentView === 'results'" class="view-results">
+      <div v-else-if="currentView === 'results'" class="view-results" key="results">
         <ReportViewer
           :reports="reports"
           v-model:selected="selectedReport"
@@ -379,6 +376,7 @@ function startNew() {
           <button class="primary" @click="startNew">Επεξεργασία Νέων Βίντεο</button>
         </div>
       </div>
+      </Transition>
     </main>
   </div>
 </template>
@@ -460,6 +458,12 @@ function startNew() {
   flex: 1;
   min-height: 0;
   overflow-y: auto;
+}
+
+/* Empty state: when the drop zone is the only content, center it in the
+   window instead of leaving a void below. */
+.view-select > :first-child:last-child {
+  margin-block: auto;
 }
 
 .view-processing {
@@ -582,6 +586,41 @@ function startNew() {
   justify-content: center;
   align-items: center;
   flex: 1;
+}
+
+/* View transitions: subtle fade + rise between workspace states */
+.view-enter-active,
+.view-leave-active {
+  transition: opacity 0.22s ease, transform 0.22s ease;
+}
+
+.view-enter-from {
+  opacity: 0;
+  transform: translateY(10px);
+}
+
+.view-leave-to {
+  opacity: 0;
+  transform: translateY(-6px);
+}
+
+.modal-enter-active,
+.modal-leave-active {
+  transition: opacity 0.2s ease;
+}
+
+.modal-enter-from,
+.modal-leave-to {
+  opacity: 0;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .view-enter-active,
+  .view-leave-active,
+  .modal-enter-active,
+  .modal-leave-active {
+    transition: none;
+  }
 }
 
 .spinner {

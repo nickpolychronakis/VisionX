@@ -20,7 +20,15 @@
         "minHeight": 600,
         "resizable": true,
         "center": true,
-        "dragDropEnabled": true
+        "dragDropEnabled": true,
+        "transparent": true,
+        "windowEffects": {
+          "effects": [
+            "underWindowBackground",
+            "mica"
+          ],
+          "state": "active"
+        }
       }
     ],
     "security": {

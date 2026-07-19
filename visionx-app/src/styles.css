@@ -31,13 +31,45 @@ html, body, #app {
   overflow: hidden;
   font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Oxygen,
     Ubuntu, Cantarell, "Open Sans", "Helvetica Neue", sans-serif;
-  /* Soft vertical wash instead of a flat block — reads "lighter" without
-     changing the actual luminance much. */
+  /* Slightly translucent base: the Tauri window ships with native
+     translucency (macOS vibrancy / Windows Mica — see tauri.conf
+     windowEffects), so the desktop softly glows through the app. In a plain
+     browser the alpha simply darkens over white — harmless. */
   background:
     radial-gradient(1200px 500px at 50% -10%, rgba(79, 140, 255, 0.08), transparent),
-    var(--bg-primary);
+    rgb(15 17 22 / 0.86);
   color: var(--text-primary);
   -webkit-font-smoothing: antialiased;
+}
+
+/* Card entrance: content rises softly into place when a view appears */
+@keyframes rise-in {
+  from { opacity: 0; transform: translateY(10px); }
+}
+
+.view-select .card,
+.view-select > * {
+  animation: rise-in 0.28s ease both;
+}
+
+.view-select > *:nth-child(2) { animation-delay: 0.05s; }
+.view-select > *:nth-child(3) { animation-delay: 0.10s; }
+.view-select > *:nth-child(4) { animation-delay: 0.15s; }
+.view-select > *:nth-child(5) { animation-delay: 0.20s; }
+
+@media (prefers-reduced-motion: reduce) {
+  .view-select .card,
+  .view-select > * { animation: none; }
+}
+
+a {
+  color: var(--accent);
+  text-decoration: none;
+}
+
+a:hover {
+  color: var(--accent-hover);
+  text-decoration: underline;
 }
 
 button {
