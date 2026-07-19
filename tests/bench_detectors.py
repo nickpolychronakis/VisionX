@@ -15,7 +15,8 @@ from ultralytics import YOLO
 VIDEO = '/Users/nickpolychronakis/Downloads/peugeot206.mp4'
 COCO_TARGET = [0, 1, 2, 3, 5, 7]  # person bicycle car motorcycle bus truck
 PROMPTS = ['person', 'bicycle', 'car', 'motorcycle', 'bus', 'truck']
-DEVICE = 'mps' if torch.backends.mps.is_available() else 'cpu'
+DEVICE = ('cuda' if torch.cuda.is_available()
+          else 'mps' if torch.backends.mps.is_available() else 'cpu')
 N_FRAMES = 25
 CONF = 0.35
 
@@ -51,14 +52,17 @@ for name, kind in CANDIDATES:
         # Warmup
         for f in frames[:3]:
             model.predict(f, **kwargs)
-        if DEVICE == 'mps':
-            torch.mps.synchronize()
+        def _sync():
+            if DEVICE == 'mps':
+                torch.mps.synchronize()
+            elif DEVICE == 'cuda':
+                torch.cuda.synchronize()
+        _sync()
         times, dets, confs = [], 0, []
         for f in frames:
             t0 = time.perf_counter()
             r = model.predict(f, **kwargs)[0]
-            if DEVICE == 'mps':
-                torch.mps.synchronize()
+            _sync()
             times.append((time.perf_counter() - t0) * 1000)
             if r.boxes is not None:
                 dets += len(r.boxes)
