@@ -813,7 +813,8 @@ pub async fn run_setup(
     // integration pending), but shipping them keeps scripts/ in sync with the
     // repo root; plate_report.py is imported by plate.py for the HTML report.
     for script in ["vision.py", "report.py", "plate.py", "plate_report.py",
-                   "tracking.py", "stitch.py", "plate_core.py", "face_shots.py"] {
+                   "tracking.py", "stitch.py", "plate_core.py", "face_shots.py",
+                   "cross_match.py", "match_report.py"] {
         let src = resource_dir.join("scripts").join(script);
         let dst = scripts_dir.join(script);
         if src.exists() {

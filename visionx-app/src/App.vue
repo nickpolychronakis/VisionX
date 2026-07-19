@@ -89,6 +89,10 @@ function clearOutputDir() {
   settings.value.outputDir = "";
 }
 
+// Cross-video match mode (same event, multiple cameras) — per-run choice,
+// deliberately NOT persisted: it depends on what the current videos are.
+const matchMode = ref(false);
+
 // Launch the interactive plate tool on a single video (plate-only mode).
 async function runPlateTool() {
   if (selectedFiles.value.length === 0) return;
@@ -218,6 +222,7 @@ async function startProcessing() {
         stitch: settings.value.stitch,
         plates: settings.value.plates,
         faces: settings.value.faces,
+        match_videos: matchMode.value,
       },
     });
 
@@ -320,6 +325,12 @@ function startNew() {
           @pick-output-dir="pickOutputDir"
           @clear-output-dir="clearOutputDir"
         />
+
+        <label v-if="selectedFiles.length > 1" class="match-toggle">
+          <input type="checkbox" v-model="matchMode" />
+          <span>Ίδιο συμβάν από πολλές κάμερες — αντιστοίχιση αντικειμένων
+          μεταξύ των βίντεο (+ συγκεντρωτική αναφορά)</span>
+        </label>
 
         <div v-if="selectedFiles.length > 0" class="actions">
           <button
@@ -528,6 +539,23 @@ function startNew() {
 .plate-btn {
   padding: 14px 24px;
   font-size: 1rem;
+}
+
+.match-toggle {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-size: 0.9rem;
+  color: var(--text-secondary);
+  cursor: pointer;
+  padding: 0 4px;
+}
+
+.match-toggle input[type="checkbox"] {
+  width: 16px;
+  height: 16px;
+  accent-color: var(--accent);
+  flex-shrink: 0;
 }
 
 .error-message {

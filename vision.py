@@ -434,8 +434,13 @@ def warmup_gpu(model, device, imgsz=640):
         pass  # Non-critical
 
 
-def process_video(source: str, yolo: YOLO, cfg: dict, args, video_index: int = 1, total_videos: int = 1) -> str | None:
-    """Process a single video and return report path if generated"""
+def process_video(source: str, yolo: YOLO, cfg: dict, args, video_index: int = 1,
+                  total_videos: int = 1, defer_report: bool = False) -> tuple:
+    """Process a single video. Returns (report_path, tracks).
+
+    defer_report=True (cross-video match mode): skip report generation and
+    return the tracks with embeddings/snapshots INTACT — the caller matches
+    across videos first and writes all reports afterwards."""
     source_path = Path(source)
     json_progress = getattr(args, 'json_progress', False)
 
@@ -597,10 +602,14 @@ def process_video(source: str, yolo: YOLO, cfg: dict, args, video_index: int = 1
     tracks = run_stitching(tracks, cfg, json_progress)
     run_auto_plates(tracks, cfg, json_progress, fps=fps, video_path=source)
     run_face_shots(tracks, cfg, json_progress)
-    tracks = prepare_for_report(tracks)
 
     log_stderr(f'Processing complete: {source_path.name} — {n_raw} tracklets '
                f'-> {len(tracks)} objects, {frame_num} frames analyzed')
+
+    if defer_report:
+        return None, tracks
+
+    tracks = prepare_for_report(tracks)
 
     # Generate HTML report
     report_path = None
@@ -614,7 +623,73 @@ def process_video(source: str, yolo: YOLO, cfg: dict, args, video_index: int = 1
         else:
             print(f'  Report: {report_path}')
 
-    return report_path
+    return report_path, None
+
+
+def run_match_mode(video_files: list, yolo: YOLO, cfg: dict, args) -> list:
+    """Cross-video match mode (ROADMAP Phase Ε): process every video with
+    deferred reports, match objects across videos (plates + appearance),
+    re-vote plates over the union of each group's snapshots, then write the
+    per-video reports plus the combined match report."""
+    json_progress = getattr(args, 'json_progress', False)
+    per_video: dict = {}
+    sources: dict = {}
+    for idx, source in enumerate(video_files, 1):
+        _, tracks = process_video(source, yolo, cfg, args, video_index=idx,
+                                  total_videos=len(video_files),
+                                  defer_report=True)
+        name = Path(source).name
+        per_video[name] = tracks or {}
+        sources[name] = source
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+
+    if json_progress:
+        emit_json('status', message='Αντιστοίχιση αντικειμένων μεταξύ βίντεο...')
+    import cross_match
+    groups = cross_match.match_videos(per_video)
+
+    # Combined plate: multiple viewpoints break the per-camera systematic
+    # blur that made single-camera votes confidently wrong.
+    reader = None
+    for g in groups:
+        member_tracks = [per_video[v][tid] for v, tid in g['members']]
+        if not any(k in member_tracks[0]['class'].lower()
+                   for k in VEHICLE_KEYWORDS):
+            continue
+        try:
+            if reader is None:
+                from plate_core import PlateReader
+                reader = PlateReader()
+            combo = cross_match.combined_plate(member_tracks, reader)
+            if combo:
+                g['combined_plate'] = combo
+        except Exception as e:  # noqa: BLE001
+            log_stderr(f'Combined plate vote failed ({e})')
+    log_stderr(f'Cross-match: {len(groups)} matched objects across '
+               f'{len(video_files)} videos')
+
+    # Reports: per-video first (prepare_for_report encodes the snapshots the
+    # match report also embeds), then the combined match report.
+    reports = []
+    output_dir = args.output or str(Path(video_files[0]).parent)
+    for name, tracks in per_video.items():
+        if not tracks:
+            continue
+        prepare_for_report(tracks)
+        rp = generate_report(tracks, output_dir, Path(name).stem, sources[name])
+        reports.append(rp)
+        if json_progress:
+            emit_json('report', path=rp)
+    from match_report import generate_match_report
+    mp = generate_match_report(per_video, groups, output_dir,
+                               list(per_video.keys()))
+    reports.append(mp)
+    if json_progress:
+        emit_json('report', path=mp)
+    else:
+        print(f'  Match report: {mp}')
+    return reports
 
 
 def get_video_fps(source: str) -> tuple[int, float]:
@@ -806,7 +881,10 @@ def _parallel_worker(worker_args: dict) -> str | None:
     if not using_optimized:
         yolo.set_classes(prompts)  # type: ignore[misc]
 
-    return process_video(source, yolo, cfg, args, video_index=video_index, total_videos=total_videos)
+    report_path, _ = process_video(source, yolo, cfg, args,
+                                   video_index=video_index,
+                                   total_videos=total_videos)
+    return report_path
 
 
 def main():
@@ -835,6 +913,9 @@ Examples:
     parser.add_argument('--show', action='store_true', help='Live preview')
     parser.add_argument('--parallel', type=int, default=1, help='Number of parallel workers')
     parser.add_argument('--chain', action='store_true', help='Process multiple videos as continuous sequence')
+    parser.add_argument('--match', action='store_true',
+                        help='Cross-video matching: same event from multiple '
+                             'cameras — match objects across the videos')
     # Phase A-Γ feature toggles (all default ON via config; these disable).
     parser.add_argument('--no-stitch', action='store_true',
                         help='Disable offline tracklet stitching')
@@ -1046,6 +1127,10 @@ Examples:
         report_path = process_video_chain(video_files, yolo, cfg, args)
         if report_path:
             reports.append(report_path)
+    elif getattr(args, 'match', False) and total_videos > 1:
+        # Cross-video match mode (sequential by design: tracks from all
+        # videos must coexist in memory for the matching pass).
+        reports.extend(run_match_mode(video_files, yolo, cfg, args))
     elif parallel > 1 and total_videos > 1:
         # Parallel mode: process videos concurrently
         workers = min(parallel, total_videos)
@@ -1082,7 +1167,7 @@ Examples:
     else:
         # Normal mode: process each video independently
         for idx, source in enumerate(video_files, 1):
-            report_path = process_video(source, yolo, cfg, args, video_index=idx, total_videos=total_videos)
+            report_path, _ = process_video(source, yolo, cfg, args, video_index=idx, total_videos=total_videos)
             if report_path:
                 reports.append(report_path)
             # Free GPU cache between videos to prevent OOM

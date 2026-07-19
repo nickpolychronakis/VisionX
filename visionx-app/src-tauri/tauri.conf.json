@@ -41,7 +41,9 @@
       "resources/scripts/tracking.py": "scripts/tracking.py",
       "resources/scripts/stitch.py": "scripts/stitch.py",
       "resources/scripts/plate_core.py": "scripts/plate_core.py",
-      "resources/scripts/face_shots.py": "scripts/face_shots.py"
+      "resources/scripts/face_shots.py": "scripts/face_shots.py",
+      "resources/scripts/cross_match.py": "scripts/cross_match.py",
+      "resources/scripts/match_report.py": "scripts/match_report.py"
     },
     "icon": [
       "icons/32x32.png",

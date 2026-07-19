@@ -46,6 +46,9 @@ struct ProcessConfig {
     plates: bool,
     #[serde(default = "default_true")]
     faces: bool,
+    // Cross-video matching (same event, multiple cameras) — Phase Ε.
+    #[serde(default)]
+    match_videos: bool,
 }
 
 fn default_true() -> bool { true }
@@ -205,6 +208,10 @@ async fn process_videos(
     if !config.output_dir.is_empty() {
         args.push("--output".to_string());
         args.push(config.output_dir.clone());
+    }
+
+    if config.match_videos && files.len() > 1 {
+        args.push("--match".to_string());
     }
 
     // Analysis-feature toggles (default ON; only pass the disabling flag).
