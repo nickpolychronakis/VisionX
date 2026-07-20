@@ -1084,8 +1084,14 @@ Examples:
         video_files.extend(args.source)
 
     if not video_files:
+        # Exit non-zero so the desktop app surfaces this as an error instead
+        # of "finished, 0 reports" (bit us when nargs='+' filter flags
+        # swallowed the video path — silent success hid the real failure).
+        print('Error: no video files given (check argument order — '
+              'use "--" before file paths if filters are present)',
+              file=sys.stderr)
         parser.print_help()
-        return
+        sys.exit(2)
 
     # Two-stage architecture (user-designed, see BENCHMARKS.md): detection
     # ALWAYS runs closed-set on the fixed scope (people + vehicles) — best

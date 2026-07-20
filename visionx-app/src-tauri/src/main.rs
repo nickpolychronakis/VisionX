@@ -238,6 +238,10 @@ async fn process_videos(
         args.extend(config.filter_types.iter().cloned());
     }
 
+    // "--" ends option parsing: the filter flags above are nargs='+', and
+    // without the separator argparse swallows the video paths as filter
+    // values → vision.py sees zero sources and exits without processing.
+    args.push("--".to_string());
     args.extend(files.iter().cloned());
 
     let _ = app.emit("progress", ProgressEvent {
