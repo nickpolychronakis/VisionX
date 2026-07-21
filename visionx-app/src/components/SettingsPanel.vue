@@ -65,23 +65,34 @@ const outputDirName = computed(() => {
   return d.split(/[\\/]/).pop() || d;
 });
 
-// Dynamic imgsz options based on video resolution
+// Dynamic imgsz options based on video resolution.
+// value 0 = "Αυτόματο" (default): resolved at start to min(video, 1280) —
+// the accuracy sweet spot. Above the fixed steps, videos beyond 1920px get
+// an explicit full-resolution entry (useful for distant/small objects on
+// fixed 4K cameras; marked slow because cost grows with the square of size).
 const imgszOptions = computed(() => {
   const maxRes = props.videoResolution || 640;
+  const auto = Math.max(320, Math.min(maxRes || 1280, 1280));
   const options = [
+    { value: 0, label: `Αυτόματο - ${auto}px (προτείνεται)` },
     { value: 320, label: "320px - Ταχύτατο" },
     { value: 480, label: "480px - Γρήγορο" },
     { value: 640, label: "640px - Κανονικό" },
     { value: 960, label: "960px - Υψηλή" },
     { value: 1280, label: "1280px - Πολύ υψηλή" },
     { value: 1920, label: "1920px - Πλήρης HD" },
-  ];
-  // Only show options up to the video resolution
-  return options.filter((o) => o.value <= Math.max(maxRes, 320));
+  ].filter((o) => o.value <= Math.max(maxRes, 320));
+  if (maxRes > 1920) {
+    // YOLO wants a multiple of 32 — round the native width to the nearest.
+    const full = Math.round(maxRes / 32) * 32;
+    options.push({ value: full, label: `${maxRes}px - Πλήρης ανάλυση (αργό)` });
+  }
+  return options;
 });
 
 // Default label for imgsz
 const imgszLabel = computed(() => {
+  if (settings.value.imgsz === 0) return "Αυτόματο";
   const maxRes = props.videoResolution || 0;
   if (maxRes > 0 && settings.value.imgsz >= maxRes) {
     return `${settings.value.imgsz}px (πλήρης)`;

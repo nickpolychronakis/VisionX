@@ -44,7 +44,12 @@ const selectedFiles = ref<string[]>([]);
 const SETTINGS_KEY = "visionx.settings.v1";
 const DEFAULT_SETTINGS = {
   confidence: 0.35,
-  imgsz: 640,
+  // 0 = "Αυτόματο": match the video resolution up to 1280 (resolved at start
+  // of processing). Detection accuracy peaks near training sizes (640-1280);
+  // beyond ~2K it degrades for near objects while cost grows quadratically —
+  // full resolution stays available as an explicit choice for distant/small
+  // objects on fixed 4K cameras.
+  imgsz: 0,
   outputDir: "",
   // Structured filters (fixed choices) — free text removed by design.
   filterColors: [] as string[],
@@ -61,7 +66,15 @@ const DEFAULT_SETTINGS = {
 function loadSettings() {
   try {
     const raw = localStorage.getItem(SETTINGS_KEY);
-    if (raw) return { ...DEFAULT_SETTINGS, ...JSON.parse(raw) };
+    if (raw) {
+      const saved = { ...DEFAULT_SETTINGS, ...JSON.parse(raw) };
+      // Filters are per-case criteria, not preferences: a selection left over
+      // from a previous case must not silently colour the next report, so
+      // every launch starts with no filters (= analyse/highlight everything).
+      saved.filterColors = [];
+      saved.filterTypes = [];
+      return saved;
+    }
   } catch (e) {
     console.error("Failed to load settings:", e);
   }
@@ -191,8 +204,9 @@ async function detectResolution(files: string[]) {
   try {
     const res = await invoke<number>("get_video_resolution", { files });
     videoResolution.value = res;
-    // Auto-set imgsz to min(640, video resolution) as default
-    if (res > 0 && res < settings.value.imgsz) {
+    // A saved fixed imgsz can exceed a smaller new video — clamp it down.
+    // imgsz 0 (Αυτόματο) needs nothing: it resolves at processing start.
+    if (res > 0 && settings.value.imgsz > 0 && res < settings.value.imgsz) {
       settings.value.imgsz = Math.max(320, Math.min(res, 640));
     }
   } catch {
@@ -208,6 +222,14 @@ function onFilesSelected(files: string[]) {
 
 function removeFile(index: number) {
   selectedFiles.value.splice(index, 1);
+}
+
+// Resolve imgsz 0 (Αυτόματο) to a concrete size: the video's resolution
+// capped at 1280 — YOLO's sweet spot for accuracy vs. cost.
+function effectiveImgsz(): number {
+  if (settings.value.imgsz > 0) return settings.value.imgsz;
+  const res = videoResolution.value;
+  return res > 0 ? Math.max(320, Math.min(res, 1280)) : 1280;
 }
 
 async function startProcessing() {
@@ -235,7 +257,7 @@ async function startProcessing() {
         confidence: settings.value.confidence,
         stride: settings.value.stride,
         half_precision: settings.value.halfPrecision,
-        imgsz: settings.value.imgsz,
+        imgsz: effectiveImgsz(),
         parallel: settings.value.parallel,
         output_dir: settings.value.outputDir,
         filter_colors: settings.value.filterColors,
