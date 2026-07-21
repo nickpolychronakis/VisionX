@@ -139,22 +139,32 @@ def generate_report(tracks: dict, output_dir: str, video_name: str, video_path: 
         if faces_html:
             faces_html = f'<div class="faces">{faces_html}</div>'
 
-        # Snapshot gallery: best-K crops, every one zoomable.
+        # Snapshot gallery: best-K crops, every one zoomable. Each snapshot
+        # carries its full-scene context frame (red box on the object) in a
+        # data attribute — the lightbox opens on the SCENE first so the
+        # viewer sees where the crop was taken, then toggles to the close-up.
         snaps = track.get('snapshots_b64') or ([track['thumbnail']] if track.get('thumbnail') else [])
         snap_ts = track.get('snapshot_ts', [])
+        snap_ctx = track.get('snapshots_ctx_b64', [])
+
+        def _ctx_attr(k: int) -> str:
+            if k < len(snap_ctx) and snap_ctx[k]:
+                return f' data-ctx="data:image/jpeg;base64,{snap_ctx[k]}"'
+            return ''
+
         thumb_src = f"data:image/jpeg;base64,{snaps[0]}" if snaps else ""
         minis = ''
         if len(snaps) > 1:
             for k, b64 in enumerate(snaps):
                 ts_label = format_timestamp(snap_ts[k]) if k < len(snap_ts) else ''
-                minis += (f'<img src="data:image/jpeg;base64,{b64}" class="mini" '
-                          f'onclick="openLightbox(this.src, \'{title_esc} #{track_id} @ {ts_label}\')" '
+                minis += (f'<img src="data:image/jpeg;base64,{b64}" class="mini"{_ctx_attr(k)} '
+                          f'onclick="openLightbox(this.src, \'{title_esc} #{track_id} @ {ts_label}\', this.dataset.ctx)" '
                           f'title="{ts_label} — click to zoom">')
 
         card = f'''
         <div class="card" data-class="{cls_esc}">
             <div class="thumbcol">
-                <img src="{thumb_src}" alt="{cls_esc} #{track_id}" class="thumbnail" onclick="openLightbox(this.src, '{title_esc} #{track_id}')" title="Click to zoom">
+                <img src="{thumb_src}" alt="{cls_esc} #{track_id}" class="thumbnail"{_ctx_attr(0)} onclick="openLightbox(this.src, '{title_esc} #{track_id}', this.dataset.ctx)" title="Click to zoom">
                 <div class="gallery">{minis}</div>
             </div>
             <div class="info">
@@ -449,7 +459,7 @@ def generate_report(tracks: dict, output_dir: str, video_name: str, video_path: 
 
     <div class="lightbox" id="lightbox" onclick="closeLightbox()">
         <span class="lightbox-close">&times;</span>
-        <img id="lightbox-img" src="" alt="">
+        <img id="lightbox-img" src="" alt="" onclick="toggleLightboxView(event)">
         <div class="lightbox-title" id="lightbox-title"></div>
     </div>
 
@@ -462,10 +472,37 @@ def generate_report(tracks: dict, output_dir: str, video_name: str, video_path: 
             }});
         }}
 
-        function openLightbox(src, title) {{
-            document.getElementById('lightbox-img').src = src;
-            document.getElementById('lightbox-title').textContent = title;
+        // Lightbox with scene context: when a snapshot has a context frame
+        // (full scene, red box on the object), open on the SCENE first so
+        // the viewer sees where the crop comes from; clicking the image
+        // toggles scene <-> close-up. Snapshots without context (older
+        // reports, faces) just zoom the crop as before.
+        let lbCrop = '', lbCtx = '', lbTitle = '', lbShowingCtx = false;
+
+        function lbRender() {{
+            const img = document.getElementById('lightbox-img');
+            img.src = lbShowingCtx ? lbCtx : lbCrop;
+            const hint = lbCtx
+                ? (lbShowingCtx ? ' — σκηνή (κλικ για κοντινό)'
+                                : ' — κοντινό (κλικ για σκηνή)')
+                : '';
+            document.getElementById('lightbox-title').textContent = lbTitle + hint;
+        }}
+
+        function openLightbox(src, title, ctx) {{
+            lbCrop = src;
+            lbCtx = ctx || '';
+            lbTitle = title;
+            lbShowingCtx = !!lbCtx;
+            lbRender();
             document.getElementById('lightbox').classList.add('active');
+        }}
+
+        function toggleLightboxView(e) {{
+            if (!lbCtx) return;  // nothing to toggle — let the click close
+            e.stopPropagation();
+            lbShowingCtx = !lbShowingCtx;
+            lbRender();
         }}
 
         function closeLightbox() {{

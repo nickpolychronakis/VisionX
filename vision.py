@@ -611,6 +611,29 @@ def process_video(source: str, yolo: YOLO, cfg: dict, args, video_index: int = 1
                     fps=round(processing_fps, 1)
                 )
                 last_progress_time = now
+                # Live preview: the annotated frame (boxes + track IDs + conf)
+                # rides the same 0.5s throttle. Downscaled + JPEG'd it is
+                # ~30-60KB per event — negligible next to inference cost.
+                # Suppressed under parallel workers: their stdout writes
+                # exceed PIPE_BUF, so concurrent big lines could interleave
+                # and corrupt the JSON stream the app parses.
+                preview_ok = not (getattr(args, 'parallel', 1) > 1
+                                  and total_videos > 1)
+                if preview_ok:
+                    try:
+                        annotated = result.plot(line_width=2)
+                        h, w = annotated.shape[:2]
+                        if w > 720:
+                            annotated = cv2.resize(
+                                annotated, (720, int(h * 720 / w)),
+                                interpolation=cv2.INTER_AREA)
+                        ok, buf = cv2.imencode(
+                            '.jpg', annotated, [cv2.IMWRITE_JPEG_QUALITY, 60])
+                        if ok:
+                            emit_json('frame', video=source_path.name,
+                                      data=base64.b64encode(buf).decode('ascii'))
+                    except Exception:
+                        pass  # preview is best-effort; never break analysis
 
         if save_report and result.boxes is not None and len(result.boxes):
             for i in range(len(result.boxes)):

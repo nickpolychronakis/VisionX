@@ -9,6 +9,9 @@ const props = defineProps<{
   totalVideos: number;
   fps: number;
   statusMessage: string;
+  // Live annotated frame (base64 JPEG) from the analysis — empty when the
+  // preview is unavailable (e.g. parallel processing).
+  liveFrame: string;
 }>();
 
 const framePercent = computed(() => {
@@ -62,6 +65,13 @@ const estimatedTimeLeft = computed(() => {
 
     <!-- Progress bars only shown when we have frame data -->
     <template v-else>
+      <!-- Live detection preview: annotated frames streamed from the
+           analysis (boxes, track IDs, confidences) -->
+      <div v-if="liveFrame" class="live-preview">
+        <img :src="'data:image/jpeg;base64,' + liveFrame" alt="Ζωντανή προεπισκόπηση ανάλυσης" />
+        <span class="live-badge">● LIVE</span>
+      </div>
+
       <!-- Current video progress -->
       <div class="progress-section">
         <div class="progress-header">
@@ -208,5 +218,33 @@ const estimatedTimeLeft = computed(() => {
 .loading-section .hint {
   font-size: 0.85rem;
   color: var(--text-secondary);
+}
+.live-preview {
+  position: relative;
+  margin-bottom: 16px;
+  border-radius: 10px;
+  overflow: hidden;
+  border: 1px solid var(--border);
+  background: #000;
+}
+
+.live-preview img {
+  display: block;
+  width: 100%;
+  max-height: 420px;
+  object-fit: contain;
+}
+
+.live-badge {
+  position: absolute;
+  top: 8px;
+  left: 10px;
+  font-size: 0.72rem;
+  font-weight: 700;
+  letter-spacing: 0.5px;
+  color: #fff;
+  background: rgba(217, 43, 75, 0.85);
+  border-radius: 6px;
+  padding: 2px 8px;
 }
 </style>

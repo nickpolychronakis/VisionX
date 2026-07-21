@@ -29,6 +29,14 @@ struct StatusEvent {
     message: String,
 }
 
+// Live-preview frame from vision.py: annotated JPEG as base64 (~30-60KB,
+// throttled to one every 0.5s on the Python side).
+#[derive(Clone, Serialize)]
+struct FrameEvent {
+    video: String,
+    data: String,
+}
+
 #[derive(Deserialize)]
 struct ProcessConfig {
     confidence: f32,
@@ -352,6 +360,12 @@ async fn process_videos(
                                 reports.push(path.to_string());
                             }
                         },
+                        Some("frame") => {
+                            let _ = app.emit("frame", FrameEvent {
+                                video: json["video"].as_str().unwrap_or("").to_string(),
+                                data: json["data"].as_str().unwrap_or("").to_string(),
+                            });
+                        },
                         Some("model_download") => {
                             let message = json["message"].as_str().unwrap_or("Downloading model...").to_string();
                             let _ = app.emit("status", StatusEvent {
@@ -562,14 +576,34 @@ fn run_plate_tool(app: AppHandle, video: String) -> Result<(), String> {
                 scripts_dir.to_string_lossy())
     };
 
-    Command::new(&python_exe)
+    // --app-mode: plate.py prints "PLATE_REPORT::<path>" on stdout when the
+    // report is ready (and skips its own browser auto-open). We watch stdout
+    // from a thread and hand the path to the frontend, which shows the
+    // report in the results view like any video report.
+    let mut child = Command::new(&python_exe)
         .arg(plate_script.to_string_lossy().to_string())
+        .arg("--app-mode")
         .arg(&video)
         .env("PYTHONUTF8", "1")
         .env("PYTHONPATH", python_path)
         .current_dir(&scripts_dir)
+        .stdout(std::process::Stdio::piped())
         .spawn()
         .map_err(|e| format!("Failed to launch plate tool: {}", e))?;
+
+    if let Some(stdout) = child.stdout.take() {
+        let app_handle = app.clone();
+        std::thread::spawn(move || {
+            use std::io::{BufRead, BufReader};
+            for line in BufReader::new(stdout).lines().map_while(Result::ok) {
+                if let Some(path) = line.strip_prefix("PLATE_REPORT::") {
+                    let _ = app_handle.emit("plate-report", path.to_string());
+                }
+            }
+            // Reap the child so finished plate tools don't linger as zombies.
+            let _ = child.wait();
+        });
+    }
     Ok(())
 }
 

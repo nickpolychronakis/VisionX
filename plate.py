@@ -1377,6 +1377,10 @@ def parse_args():
     p.add_argument('--start-frame', type=int, default=0,
                    help='frame to start at (with --roi: tracking start frame)')
     p.add_argument('--end-frame', type=int, default=0, help='stop tracking here (0 = end)')
+    p.add_argument('--app-mode', action='store_true',
+                   help='launched from the VisionX app: emit a machine-'
+                        'readable PLATE_REPORT:: line on stdout and skip the '
+                        'browser auto-open (the app shows the report itself)')
     p.add_argument('--no-gui', action='store_true',
                    help='headless mode (requires --roi)')
     p.add_argument('--tracker', choices=['csrt', 'kcf'], default='csrt',
@@ -1509,7 +1513,12 @@ def main():
         'δες εναλλακτικές ανά θέση στο report.')
     if report_path:
         log(f'\nΑναφορά:  {report_path}')
-        if not args.no_gui:
+        if getattr(args, 'app_mode', False):
+            # The VisionX app parses this stdout marker and shows the report
+            # in its own results view (with open-in-browser / show-folder
+            # buttons there) — so no browser auto-open in this mode.
+            print(f'PLATE_REPORT::{Path(report_path).resolve()}', flush=True)
+        elif not args.no_gui:
             # Open the report right away (user request): the analysis ends
             # with the human READING it, not hunting for a file. Batch runs
             # (--no-gui) stay silent so scripts don't spawn browser windows.

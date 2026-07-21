@@ -89,8 +89,30 @@ class TrackCollector:
                                 [cv2.IMWRITE_JPEG_QUALITY, 85])
         if not ok:
             return
+        # Context frame: the WHOLE downscaled frame with a red box on the
+        # object, so the report can show where in the scene each snapshot
+        # was taken from. Captured only when a crop enters the top-K (the
+        # proxy gate above), so the extra encode cost stays negligible.
+        context = None
+        try:
+            scale = min(1.0, 800.0 / w)
+            ctx_img = (cv2.resize(frame_img,
+                                  (int(w * scale), int(h * scale)),
+                                  interpolation=cv2.INTER_AREA)
+                       if scale < 1.0 else frame_img.copy())
+            cv2.rectangle(ctx_img,
+                          (int(x1 * scale), int(y1 * scale)),
+                          (int(x2 * scale), int(y2 * scale)),
+                          (0, 0, 255), 2)
+            okc, ctx_jpeg = cv2.imencode('.jpg', ctx_img,
+                                         [cv2.IMWRITE_JPEG_QUALITY, 60])
+            if okc:
+                context = ctx_jpeg.tobytes()
+        except Exception:
+            pass  # context view is auxiliary — never lose the snapshot
         snap = {'score': proxy, 'ts': timestamp, 'file': source_name,
-                'jpeg': jpeg.tobytes(), 'box': (x1, y1, x2, y2)}
+                'jpeg': jpeg.tobytes(), 'box': (x1, y1, x2, y2),
+                'context': context}
         # Temporal diversity: K snapshots must not be K consecutive frames.
         # A new candidate within 0.7s of an existing one REPLACES it (if
         # better) instead of crowding out other moments of the track.
@@ -154,6 +176,12 @@ def prepare_for_report(tracks: dict) -> dict:
         t['snapshots_b64'] = [base64.b64encode(s['jpeg']).decode('utf-8')
                               for s in snaps]
         t['snapshot_ts'] = [s['ts'] for s in snaps]
+        # Parallel list: full-frame context (red box baked in) per snapshot;
+        # '' where capture failed so indexes stay aligned with snapshots_b64.
+        t['snapshots_ctx_b64'] = [
+            base64.b64encode(s['context']).decode('utf-8')
+            if s.get('context') else ''
+            for s in snaps]
         t['thumbnail'] = t['snapshots_b64'][0] if t['snapshots_b64'] else None
         for k in ('snapshots', '_max_diag', '_emb_vpe', '_emb_hist', '_boxes'):
             t.pop(k, None)

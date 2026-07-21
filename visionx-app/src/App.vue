@@ -104,6 +104,11 @@ const selectedReport = ref<string | null>(null);
 // Event listener cleanup
 let unlistenProgress: UnlistenFn | null = null;
 let unlistenStatus: UnlistenFn | null = null;
+let unlistenFrame: UnlistenFn | null = null;
+let unlistenPlateReport: UnlistenFn | null = null;
+
+// Live annotated preview frame (base64 JPEG) during analysis
+const liveFrame = ref("");
 
 // Computed
 const canProcess = computed(() => selectedFiles.value.length > 0);
@@ -186,11 +191,30 @@ onMounted(async () => {
       processingError.value = event.payload.message;
     }
   });
+
+  // Live annotated frames from the analysis (throttled to ~2/s upstream)
+  unlistenFrame = await listen<{ video: string; data: string }>(
+    "frame",
+    (event) => {
+      liveFrame.value = event.payload.data;
+    },
+  );
+
+  // Finished plate-tool runs: show their report in the results view like a
+  // video report (same open-in-browser / show-folder affordances there).
+  unlistenPlateReport = await listen<string>("plate-report", (event) => {
+    const path = event.payload;
+    if (!reports.value.includes(path)) reports.value.push(path);
+    selectedReport.value = path;
+    if (!isProcessing.value) currentView.value = "results";
+  });
 });
 
 onUnmounted(() => {
   if (unlistenProgress) unlistenProgress();
   if (unlistenStatus) unlistenStatus();
+  if (unlistenFrame) unlistenFrame();
+  if (unlistenPlateReport) unlistenPlateReport();
 });
 
 // Video resolution detection
@@ -239,6 +263,7 @@ async function startProcessing() {
   isProcessing.value = true;
   processingError.value = null;
   statusMessage.value = "";
+  liveFrame.value = "";
 
   progress.value = {
     currentVideo: selectedFiles.value[0],
@@ -410,6 +435,7 @@ function startNew() {
           :total-videos="progress.totalVideos"
           :fps="progress.fps"
           :status-message="statusMessage"
+          :live-frame="liveFrame"
         />
         <div class="actions">
           <button class="secondary" @click="cancelProcessing">Ακύρωση</button>
