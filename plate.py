@@ -1079,6 +1079,62 @@ def rectify_by_quads(samples: list[Sample], cw: int, ch: int, args) -> int:
 
 
 # ---------------------------------------------------------------------------
+# Phase 3.6 — regression super-resolution rendering (FSRCNN, non-generative)
+# ---------------------------------------------------------------------------
+
+_SRNET = {'sr': None, 'failed': False}
+
+# SR only helps where resolution is the bottleneck; on big crops it wastes
+# OCR votes on a near-duplicate rendering.
+SR_MAX_WIDTH = 110
+
+
+def _sr_net():
+    """FSRCNN x3 through OpenCV dnn_superres (ships in our contrib build).
+    MSE-trained pure regression: sharper learned interpolation of the real
+    pixels — architecturally incapable of the character fabrication that
+    GAN/diffusion SR exhibits (see research memo). Weights ~40KB, ~8ms/crop
+    on CPU. Optional capability: any failure disables it silently."""
+    if _SRNET['failed'] or _SRNET['sr'] is not None:
+        return _SRNET['sr']
+    try:
+        from cv2 import dnn_superres
+        candidates = [
+            Path.home() / 'Library/Application Support/com.visionx.app/models/FSRCNN_x3.pb',
+            Path(__file__).parent / 'models' / 'FSRCNN_x3.pb',
+        ]
+        path = next((p for p in candidates if p.exists()), None)
+        if path is None:
+            import urllib.request
+            path = candidates[0]
+            path.parent.mkdir(parents=True, exist_ok=True)
+            log('  Λήψη μοντέλου υπερ-ανάλυσης (FSRCNN_x3.pb, ~40KB)...')
+            urllib.request.urlretrieve(
+                'https://github.com/Saafke/FSRCNN_Tensorflow/raw/master/models/FSRCNN_x3.pb',
+                str(path))
+        sr = dnn_superres.DnnSuperResImpl_create()
+        sr.readModel(str(path))
+        sr.setModel('fsrcnn', 3)
+        _SRNET['sr'] = sr
+    except Exception as e:  # noqa: BLE001
+        log(f'  (υπερ-ανάλυση μη διαθέσιμη: {e} — συνεχίζω χωρίς)')
+        _SRNET['failed'] = True
+    return _SRNET['sr']
+
+
+def sr_rendering(crop: np.ndarray):
+    """3x regression upscale of the RAW crop (before any canonical resize,
+    so the network sees the true pixels). Returns the rendering or None."""
+    sr = _sr_net()
+    if sr is None or crop.size == 0:
+        return None
+    try:
+        return sr.upsample(crop)
+    except Exception:  # noqa: BLE001
+        return None
+
+
+# ---------------------------------------------------------------------------
 # Phase 4 — sharpness-weighted fusion
 # ---------------------------------------------------------------------------
 
@@ -1271,6 +1327,17 @@ def ocr_and_vote(recognizers, samples, fused_img, args, fused_n=0):
     base += [(s.rect_level, s.sharpness * (0.5 + s.det_conf / 2),
               f'frame {s.frame_idx} (level)')
              for s in chosen if s.rect_level is not None]
+    # Small plates additionally vote through an FSRCNN x3 regression-SR
+    # rendering of the RAW crop (resolution is their bottleneck; the learned
+    # upscale reads measurably better than cubic in the literature). Same
+    # rule as tilt-levelling: an extra VOTE, never a replacement.
+    if not getattr(args, 'no_sr', False):
+        for s in chosen:
+            if s.crop.shape[1] <= SR_MAX_WIDTH:
+                up = sr_rendering(s.crop)
+                if up is not None:
+                    base.append((up, s.sharpness * (0.5 + s.det_conf / 2),
+                                 f'frame {s.frame_idx} (sr)'))
     if fused_img is not None:
         # The fused image is our single best evidence (multi-frame denoised);
         # weight it like `fused_boost` average frames so it can outvote a few
@@ -1712,6 +1779,8 @@ def parse_args():
     p.add_argument('--ecc-iters', type=int, default=100,
                    help='ECC alignment iterations (default 100)')
     p.add_argument('--top', type=int, default=5, help='number of candidates to output (default 5)')
+    p.add_argument('--no-sr', action='store_true',
+                   help='disable the FSRCNN super-resolution vote for small plates')
     p.add_argument('--no-rectify', action='store_true',
                    help='disable WPODNet quad rectification of tilted plates')
     p.add_argument('--no-pattern-prior', action='store_true',
