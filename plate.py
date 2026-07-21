@@ -1900,6 +1900,15 @@ def main():
                 log('aborted.')
                 return
             log(f'ROI {seg_roi} @ frame {seg_start} (τμήμα {len(segments) + 1})')
+            if seg_roi[2] < 90:
+                # Ground-truth calibrated: below ~90px plate width the OCR
+                # ceiling dominates (documented Y/Z/3/4 confusions). Steer
+                # the user toward the vehicle's closest pass BEFORE they
+                # spend minutes tracking a segment that can't read well.
+                log(f'  ΠΡΟΣΟΧΗ: η πινακίδα είναι ~{seg_roi[2]}px — κάτω από '
+                    f'~90px οι χαρακτήρες συγχέονται συστηματικά. Αν το όχημα '
+                    f'φαίνεται πιο ΚΟΝΤΑ σε άλλο σημείο του βίντεο, προτίμησε '
+                    f'εκείνο (ή πρόσθεσε το ως τμήμα με n στο τέλος).')
             seg_samples = collect_samples(cap, detector, seg_start, seg_roi,
                                           args, fps=fps)
             segments.append((seg_start, seg_roi))
