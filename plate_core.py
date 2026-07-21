@@ -24,8 +24,12 @@ class PlateReader:
         from fast_plate_ocr import LicensePlateRecognizer
         # conf 0.15: same permissive gate as the interactive tool — dusk and
         # small plates score 0.15-0.35 and the voting filters noise anyway.
+        # CPU provider explicitly: the CoreML EP cannot express this model's
+        # zero-detection output (dynamic {-1} shape, 0 elements) and throws
+        # on every empty frame (see plate.py for the field case).
         self.detector = LicensePlateDetector(detection_model=detector_model,
-                                             conf_thresh=0.15)
+                                             conf_thresh=0.15,
+                                             providers=['CPUExecutionProvider'])
         self.recognizers = [
             {'name': m.strip(),
              'rec': LicensePlateRecognizer(m.strip(), device='cpu'),

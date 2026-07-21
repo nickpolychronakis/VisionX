@@ -1863,7 +1863,13 @@ def main():
     # conf_thresh 0.15 (was 0.25): the tracking loop applies its own DET_ACCEPT
     # gate on top; the lib-level threshold only needs to let dusk/small-plate
     # detections (0.15-0.35 range) through for the refinement logic to weigh.
-    detector = LicensePlateDetector(detection_model=args.detector_model, conf_thresh=0.15)
+    # CPU provider explicitly: onnxruntime's CoreML EP cannot express this
+    # model's zero-detection output (dynamic {-1} shape with 0 elements) and
+    # throws + retries on EVERY empty frame — night footage spammed hundreds
+    # of errors/min and wasted the failed-inference time. The tiny YOLOv9-t
+    # runs in a few ms on CPU anyway (it only ever sees small crops).
+    detector = LicensePlateDetector(detection_model=args.detector_model, conf_thresh=0.15,
+                                    providers=['CPUExecutionProvider'])
     model_names = [m.strip() for m in args.ocr_model.split(',') if m.strip()]
     recognizers = [{'name': m, 'rec': LicensePlateRecognizer(m, device='cpu'),
                     'gray': False} for m in model_names]
