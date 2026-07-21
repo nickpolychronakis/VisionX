@@ -110,6 +110,7 @@ K_L = (ord('l'), ord('L'), 955, 923)   # l · λ · Λ
 K_R = (ord('r'), ord('R'), 961, 929)   # r · ρ · Ρ
 K_F = (ord('f'), ord('F'), 966, 934)   # f · φ · Φ
 K_Q = (ord('q'), ord('Q'), 59)         # q — Greek layout maps the q key to ';'
+K_N = (ord('n'), ord('N'), 957, 925)   # n · ν · Ν — "new segment" prompt
 
 
 def _seek_step(key: int) -> int:
@@ -178,9 +179,16 @@ class _ConfirmQuit:
             DEBUG(mode, 'quit confirmed (second q)')
             return True
         self._armed_at = now
-        log('  press q again to finish')
+        log('  Πατήστε ξανά q για ολοκλήρωση')
         DEBUG(mode, 'quit armed, awaiting second q')
         return False
+
+    @property
+    def pending(self) -> bool:
+        """True while the first q is armed — the HUD shows the hint so the
+        user watching the VIDEO (not the terminal) knows a second q is
+        expected (field feedback: single q appearing to 'do nothing')."""
+        return time.monotonic() - self._armed_at <= 1.5
 
 
 # ---------------------------------------------------------------------------
@@ -435,6 +443,8 @@ def gui_pick_roi(cap, total_frames, fps, start_frame=0):
         ts = state['pos'] / fps
         _hud(disp, 1, f'frame {state["pos"]}  t={int(ts//60):02d}:{ts%60:05.2f}  '
              f'{"PLAY" if playing else "PAUSE"}  drag box = select plate')
+        if quit_guard.pending:
+            _hud(disp, 2, 'PRESS q AGAIN TO QUIT', (0, 0, 255))
         # Bar appended BELOW the frame — the full image stays drag-selectable.
         cv2.imshow(WINDOW, np.vstack([disp, _seek_bar_strip(W, state['pos'], total_frames)]))
 
@@ -500,6 +510,47 @@ def refine_with_detector(detector, frame, box, pad_ratio=0.6):
         if best_key is None or key > best_key:
             best, best_key, best_conf = cand, key, float(d.confidence)
     return best, best_conf
+
+
+def ask_more_segments(cap, pos, total_frames):
+    """End-of-segment prompt: the same vehicle often appears again later in
+    the video (arrives at the start, leaves at the end). [n] loops back to
+    the seek/select phase for another segment — the frames of ALL segments
+    then vote together in one candidate list (more frames = measurably
+    better odds of the true plate ranking high). ENTER/q proceeds to the
+    analysis. GUI-only."""
+    frame = seek(cap, max(0, min(pos, total_frames - 1)))
+    if frame is None:
+        return False
+    disp = frame.copy()
+    _hud(disp, 1, 'Segment finished - is the SAME vehicle visible '
+                  'elsewhere in the video?')
+    _hud(disp, 2, '[n] add another segment   [ENTER or q] finish & analyse',
+         (0, 255, 0))
+    cv2.imshow(WINDOW, disp)
+    log('\n[Τμήμα] n = νέο τμήμα (ίδιο όχημα σε άλλο σημείο) · '
+        'ENTER/q = ολοκλήρωση & ανάλυση')
+    while True:
+        key = _wait_key(50, 'segment-prompt')
+        if key in K_N:
+            return True
+        if key in K_ENTER or key in K_Q or key == K_ESC:
+            return False
+
+
+def show_busy(frame, step, text):
+    """Paint a processing banner into the tool window between the heavy
+    synchronous stages (ECC, fusion, OCR, report). Without it the window
+    freezes on the last frame after q-q and the user thinks the tool hung
+    (field feedback). cv2.waitKey(1) flushes the paint before the stage
+    starts. No-op in --no-gui runs (frame is None)."""
+    if frame is None:
+        return
+    dark = (frame * 0.35).astype(np.uint8)
+    _hud(dark, 1, f'PROCESSING {step}/4 - {text}', (0, 255, 255))
+    _hud(dark, 2, 'please wait, the report will open when done', (255, 255, 255))
+    cv2.imshow(WINDOW, dark)
+    cv2.waitKey(1)
 
 
 def collect_samples(cap, detector, start_frame, roi, args, fps=25.0):
@@ -695,6 +746,8 @@ def collect_samples(cap, detector, start_frame, roi, args, fps=25.0):
                 _hud(disp, 2, f'DET OK {det_conf:.2f}', (0, 255, 0))
             else:
                 _hud(disp, 2, f'DET MISS {det_miss}', (0, 200, 255))
+            if quit_guard.pending:
+                _hud(disp, 3, 'PRESS q AGAIN TO FINISH', (0, 0, 255))
             cv2.imshow(WINDOW, disp)
             # Sleep away whatever is left of the frame budget so the preview
             # runs at the chosen fraction of real time instead of CPU speed.
@@ -1470,23 +1523,59 @@ def main():
         except (ValueError, AssertionError):
             fail('--roi must be "x,y,w,h" with positive w,h')
         start_frame = args.start_frame
+        samples = collect_samples(cap, detector, start_frame, roi, args, fps=fps)
+        segments = [(start_frame, roi)]
     else:
-        start_frame, roi = gui_pick_roi(cap, total_frames, fps, args.start_frame)
-        if roi is None:
-            log('aborted.')
-            return
-        log(f'ROI {roi} @ frame {start_frame}')
+        # Multi-segment collection: the same vehicle often shows up more
+        # than once (arrives early, leaves late). After each segment the
+        # user can seek anywhere and track another appearance — the frames
+        # of ALL segments feed one common vote.
+        samples = []
+        segments = []
+        next_pos = args.start_frame
+        while True:
+            seg_start, seg_roi = gui_pick_roi(cap, total_frames, fps, next_pos)
+            if seg_roi is None:
+                if segments:
+                    break  # user aborted the EXTRA pick — analyse what we have
+                log('aborted.')
+                return
+            log(f'ROI {seg_roi} @ frame {seg_start} (τμήμα {len(segments) + 1})')
+            seg_samples = collect_samples(cap, detector, seg_start, seg_roi,
+                                          args, fps=fps)
+            segments.append((seg_start, seg_roi))
+            samples.extend(seg_samples)
+            log(f'Τμήμα {len(segments)}: {len(seg_samples)} καρέ — '
+                f'σύνολο {len(samples)}')
+            next_pos = max((s.frame_idx for s in seg_samples),
+                           default=seg_start) + 1
+            if not samples or next_pos >= total_frames - 1:
+                break
+            if not ask_more_segments(cap, next_pos, total_frames):
+                break
+        start_frame, roi = segments[0]
+        # Segments may overlap if the user seeks backwards — one vote per
+        # video frame (first observation wins) so no frame double-votes.
+        seen_idx: set = set()
+        samples = [s for s in samples
+                   if not (s.frame_idx in seen_idx or seen_idx.add(s.frame_idx))]
 
-    samples = collect_samples(cap, detector, start_frame, roi, args, fps=fps)
+    # Keep a full frame for the processing banner (GUI runs), then free the
+    # capture — every stage after this works on the collected crops.
+    busy_frame = None
+    if not args.no_gui and samples:
+        busy_frame = seek(cap, min(max(s.frame_idx for s in samples),
+                                   total_frames - 1))
     cap.release()
-    if not args.no_gui:
-        cv2.destroyAllWindows()
 
     if not samples:
         fail('no usable plate samples collected')
-    log(f'\nCollected {len(samples)} samples, rectifying + aligning...')
+    seg_note = f' από {len(segments)} τμήματα' if len(segments) > 1 else ''
+    log(f'\nCollected {len(samples)} samples{seg_note}, rectifying + aligning...')
 
+    show_busy(busy_frame, 1, f'ECC alignment of {len(samples)} frames')
     ref, aligned = rectify_and_align(samples, args)
+    show_busy(busy_frame, 2, 'multi-frame fusion')
     fused_img, fused_n = fuse(samples, args.fuse_top)
 
     n_pool = len(ocr_pool(samples, args.max_ocr_frames))
@@ -1494,21 +1583,30 @@ def main():
         f'{" + fused" if fused_img is not None else ""}'
         f'{"" if args.no_enhance else ", x4 tonal variants"}'
         f', x{len(recognizers)} models)...')
+    show_busy(busy_frame, 3,
+              f'OCR: {n_pool} crops x {len(recognizers)} models')
     candidates, gr_candidates, reads, region_votes = ocr_and_vote(
         recognizers, samples, fused_img, args, fused_n=fused_n)
 
+    show_busy(busy_frame, 4, 'writing the report')
     out_dir = args.output or str(video_path.parent / f'{video_path.stem}_plate')
     json_path, report_path = save_outputs(
         video_path, out_dir, samples, ref, fused_img, candidates,
         reads, region_votes, roi, start_frame, fps, args,
         fused_n=fused_n, gr_candidates=gr_candidates)
+    if not args.no_gui:
+        cv2.destroyAllWindows()
 
     summary = print_results(candidates, gr_candidates, reads, region_votes,
                             len(samples), aligned, fused_n)
     # Plain-text copy of the console summary, saved with the artifacts.
     with open(Path(out_dir) / 'summary.txt', 'w', encoding='utf-8') as f:
-        f.write(f'Video: {video_path}\nROI: {roi} @ frame {start_frame}\n\n')
-        f.write('\n'.join(summary) + '\n')
+        f.write(f'Video: {video_path}\nROI: {roi} @ frame {start_frame}\n')
+        if len(segments) > 1:
+            f.write('Τμήματα: ' + ' · '.join(
+                f'#{i + 1} frame {sf} roi {r}'
+                for i, (sf, r) in enumerate(segments)) + '\n')
+        f.write('\n' + '\n'.join(summary) + '\n')
     log('\nScore = σχετική κατάταξη (0-1), όχι πιθανότητα. "?" = αβέβαιη θέση — '
         'δες εναλλακτικές ανά θέση στο report.')
     if report_path:
