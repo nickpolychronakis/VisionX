@@ -643,6 +643,42 @@ def make_tracker(kind: str):
     return cv2.TrackerCSRT_create()
 
 
+def bright_plate_quad(crop: np.ndarray):
+    """Saturated-plate geometry: on burned night footage a HUMAN instantly
+    sees the white parallelogram even though OCR/neural detectors see no
+    character texture (user: "can't it spot the white rectangle like a
+    person would?"). Threshold the near-clipped range and accept the largest
+    solid, plate-shaped rotated rectangle. Returns 4 corner points (float32
+    4x2, crop coords) or None. Headlight flares fail the aspect (round) and
+    solidity (irregular glow) gates."""
+    if crop.size == 0:
+        return None
+    g = cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY)
+    mask = (g >= 235).astype(np.uint8) * 255
+    mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, np.ones((3, 3), np.uint8))
+    contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL,
+                                   cv2.CHAIN_APPROX_SIMPLE)
+    ch, cw = g.shape
+    best, best_area = None, 0.0
+    for c in contours:
+        area = cv2.contourArea(c)
+        if area < 0.02 * cw * ch:
+            continue
+        (cx, cy), (rw, rh), ang = cv2.minAreaRect(c)
+        if rw < rh:
+            rw, rh = rh, rw
+        if rh <= 1:
+            continue
+        aspect = rw / rh
+        solidity = area / max(1.0, rw * rh)
+        if not (1.8 <= aspect <= 7.5) or solidity < 0.75:
+            continue
+        if area > best_area:
+            best_area = area
+            best = cv2.boxPoints(((cx, cy), (rw, rh), ang))
+    return best
+
+
 def refine_with_detector(detector, frame, box, pad_ratio=0.6):
     """Run the plate detector on a padded crop around `box`.
 
@@ -681,6 +717,20 @@ def refine_with_detector(detector, frame, box, pad_ratio=0.6):
                     # Confirm the CURRENT box with the boosted confidence —
                     # geometry stays the tracker's.
                     return box, float(d.confidence)
+        except Exception:  # noqa: BLE001
+            pass
+        # Last resort — SATURATED plate: neural detection needs character
+        # texture, but a burned plate is still an unmistakable white
+        # parallelogram. Geometric confirm (aspect+solidity gates), same
+        # confirm-only rule: validates the tracker's box, never moves it.
+        try:
+            quad = bright_plate_quad(crop)
+            if quad is not None:
+                qx1, qy1 = quad[:, 0].min() + ox, quad[:, 1].min() + oy
+                qx2, qy2 = quad[:, 0].max() + ox, quad[:, 1].max() + oy
+                cand = (int(qx1), int(qy1), int(qx2 - qx1), int(qy2 - qy1))
+                if iou(cand, box) >= 0.25:
+                    return box, DET_ACCEPT  # minimal confirming confidence
         except Exception:  # noqa: BLE001
             pass
     if not dets:
@@ -957,6 +1007,13 @@ def collect_samples(cap, detector, start_frame, roi, args, fps=25.0):
                     crop_q = frame[y:y + h, x:x + w]
                     if crop_q.size:
                         q, _ = estimate_quad(crop_q, args)
+                        if q is None:
+                            # Saturated plates: WPOD sees no texture, but the
+                            # white parallelogram's own corners outline the
+                            # plate exactly — even at an angle.
+                            bq = bright_plate_quad(crop_q)
+                            q = ([(float(px), float(py)) for px, py in bq]
+                                 if bq is not None else None)
                         live_quad['pts'] = ([(int(qx + x), int(qy + y))
                                              for qx, qy in q] if q else None)
                         live_quad['box'] = box
