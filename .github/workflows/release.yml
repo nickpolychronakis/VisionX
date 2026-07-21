@@ -22,10 +22,15 @@ jobs:
         shell: bash
         run: |
           mkdir -p visionx-app/src-tauri/resources/scripts
-          cp vision.py visionx-app/src-tauri/resources/scripts/
-          cp report.py visionx-app/src-tauri/resources/scripts/
-          cp config.yaml visionx-app/src-tauri/resources/
-          cp tracker.yaml visionx-app/src-tauri/resources/
+          # Copy EVERY script tauri.conf.json lists as a resource — a partial
+          # list here fails the bundle when the conf grows (bit us at 0.8.0:
+          # only 2 of 12 scripts were copied).
+          for f in vision report plate plate_report tracking stitch \
+                   plate_core face_shots cross_match match_report \
+                   attributes prompt_filter; do
+            cp "$f.py" visionx-app/src-tauri/resources/scripts/
+          done
+          cp config.yaml tracker.yaml visionx-app/src-tauri/resources/
 
       - name: Install pnpm
         uses: pnpm/action-setup@v4
