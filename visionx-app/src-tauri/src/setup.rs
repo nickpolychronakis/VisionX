@@ -607,6 +607,9 @@ pub async fn run_setup(
         // detector (open-image-models) + fast-plate-ocr OCR. Version check is None
         // because fast_alpr does not expose a __version__ attribute (like clip).
         ("fast_alpr", "fast-alpr>=0.4.0", None),
+        // WPODNet quad rectification for tilted plates (plate.py); weights
+        // auto-download on first use (see plate.py _wpod_predictor).
+        ("wpodnet", "wpodnet-pytorch>=1.1.1", None),
         // onnxruntime is an OPTIONAL extra of fast-plate-ocr 1.x — without an
         // explicit install the plate detector/OCR models cannot run at all.
         ("onnxruntime", "onnxruntime>=1.27.0", Some("1.27.0")),

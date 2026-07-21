@@ -32,6 +32,7 @@ Usage:
 
 import argparse
 import json
+import math
 import sys
 import time
 from dataclasses import dataclass, field
@@ -207,6 +208,7 @@ class Sample:
     aligned: np.ndarray = None  # ECC-aligned version of rect (None if ECC failed)
     ecc_cc: float = 0.0         # ECC correlation vs reference (alignment quality)
     sat_ratio: float = 0.0      # fraction of clipped (>=250) pixels — burned plate
+    rect_level: np.ndarray = None  # tilt-corrected rendering (quad-levelled)
 
 
 @dataclass
@@ -567,6 +569,9 @@ def collect_samples(cap, detector, start_frame, roi, args, fps=25.0):
     if frame is None:
         fail(f'cannot read start frame {start_frame}')
     H, W = frame.shape[:2]
+    # Live plate-outline state (WPODNet quad, refreshed at 2Hz on
+    # detector-confirmed frames; translated with the box in between).
+    live_quad = {'ts': -10.0, 'pts': None, 'box': (0, 0, 0, 0)}
 
     samples: list[Sample] = []
     tracker = None  # created by reseed() below
@@ -738,6 +743,28 @@ def collect_samples(cap, detector, start_frame, roi, args, fps=25.0):
             # only if it stays orange while sliding off the plate).
             color = (0, 255, 0) if det_conf > 0 else (0, 200, 255)
             cv2.rectangle(disp, (x, y), (x + w, y + h), color, _box_thickness(disp))
+            # True plate outline (user request): WPODNet quad, refreshed at
+            # most twice a second on detector-confirmed frames — the box is
+            # the tracker's container, the quad is the plate itself.
+            if det_conf > 0 and not getattr(args, 'no_rectify', False):
+                now_q = time.monotonic()
+                if now_q - live_quad['ts'] >= 0.5:
+                    live_quad['ts'] = now_q
+                    crop_q = frame[y:y + h, x:x + w]
+                    if crop_q.size:
+                        q, _ = estimate_quad(crop_q, args)
+                        live_quad['pts'] = ([(int(qx + x), int(qy + y))
+                                             for qx, qy in q] if q else None)
+                        live_quad['box'] = box
+            if live_quad.get('pts'):
+                # Translate the last quad by the box's motion since it was
+                # computed — follows the plate between the 2Hz refreshes.
+                bx0, by0 = live_quad['box'][:2]
+                dx, dy = x - bx0, y - by0
+                pts = np.array([(px + dx, py + dy)
+                                for px, py in live_quad['pts']])
+                cv2.polylines(disp, [pts], True, (80, 255, 80),
+                              max(1, _box_thickness(disp) - 1))
             _hud(disp, 1, f'frame {frame_idx}  samples {len(samples)}  '
                  f'{"FAST" if fast else f"{speed_steps[speed_i]:g}x"}')
             # Persistent detector status (user feedback: an indicator that only
@@ -880,6 +907,10 @@ def rectify_and_align(samples: list[Sample], args) -> tuple:
     ref = max(samples, key=lambda s: s.sharpness * (0.5 + s.det_conf / 2))
     cw, ch = canonical_size(ref.box[2], ref.box[3])
 
+    # Quad-based tilt correction produces an ADDITIONAL rendering per tilted
+    # frame (s.rect_level) — it votes alongside the plain resize instead of
+    # replacing it, so imperfect quads can never make results worse.
+    rectify_by_quads(samples, cw, ch, args)
     for s in samples:
         s.rect = cv2.resize(s.crop, (cw, ch), interpolation=cv2.INTER_CUBIC)
 
@@ -915,6 +946,136 @@ def rectify_and_align(samples: list[Sample], args) -> tuple:
             # from fusion but still contributes an individual OCR vote.
             s.aligned = None
     return ref, aligned
+
+
+# ---------------------------------------------------------------------------
+# Phase 3.5 — quad rectification (WPODNet corner regression)
+# ---------------------------------------------------------------------------
+
+# Lazy singleton: the WPODNet predictor loads once (~1s) on first use.
+_WPOD = {'predictor': None, 'failed': False}
+
+RECTIFY_MIN_CONF = 0.60   # quad confidence gate
+RECTIFY_MIN_TILT = 6.0    # degrees — research ablation: rectification gains
+                          # +14-17pp on oblique plates but ~0 (slightly
+                          # negative) on frontal ones, so near-frontal crops
+                          # keep the plain resize path.
+
+
+def _wpod_predictor(args):
+    """Load WPODNet from the app models dir / script dir / download. Returns
+    the predictor or None (optional capability — plate reading must keep
+    working without it)."""
+    if _WPOD['failed'] or _WPOD['predictor'] is not None:
+        return _WPOD['predictor']
+    try:
+        from wpodnet import Predictor, load_wpodnet_from_checkpoint
+        candidates = [
+            Path.home() / 'Library/Application Support/com.visionx.app/models/wpodnet.pth',
+            Path(__file__).parent / 'models' / 'wpodnet.pth',
+        ]
+        ckpt = next((p for p in candidates if p.exists()), None)
+        if ckpt is None:
+            import urllib.request
+            ckpt = candidates[0]
+            ckpt.parent.mkdir(parents=True, exist_ok=True)
+            log('  Λήψη μοντέλου ισιώματος (wpodnet.pth, ~6MB)...')
+            urllib.request.urlretrieve(
+                'https://github.com/Pandede/WPODNet-Pytorch/releases/download/1.0.0/wpodnet.pth',
+                str(ckpt))
+        _WPOD['predictor'] = Predictor(load_wpodnet_from_checkpoint(str(ckpt)))
+    except Exception as e:  # noqa: BLE001 — optional capability
+        log(f'  (ίσιωμα μη διαθέσιμο: {e} — συνεχίζω χωρίς)')
+        _WPOD['failed'] = True
+    return _WPOD['predictor']
+
+
+def _quad_tilt_deg(quad) -> float:
+    """Max deviation from horizontal/vertical of the quad's top & left edges."""
+    (x0, y0), (x1, y1), _, (x3, y3) = quad
+    top = abs(math.degrees(math.atan2(y1 - y0, max(1e-6, x1 - x0))))
+    left = abs(90.0 - abs(math.degrees(math.atan2(y3 - y0, x3 - x0))))
+    return max(top, left)
+
+
+def estimate_quad(crop: np.ndarray, args):
+    """Plate quad inside a (tight) crop via WPODNet corner regression.
+    Returns (quad 4x(x,y) in crop coords, confidence) or (None, 0.0).
+    The crop gets a 25% replicated border first — the net expects some
+    context around the plate, which tight tracker boxes lack."""
+    predictor = _wpod_predictor(args)
+    if predictor is None:
+        return None, 0.0
+    try:
+        from PIL import Image
+        h, w = crop.shape[:2]
+        pad = max(8, int(0.25 * max(w, h)))
+        padded = cv2.copyMakeBorder(crop, pad, pad, pad, pad,
+                                    cv2.BORDER_REPLICATE)
+        pred = predictor.predict(
+            Image.fromarray(cv2.cvtColor(padded, cv2.COLOR_BGR2RGB)))
+        if pred.confidence < RECTIFY_MIN_CONF:
+            return None, float(pred.confidence)
+        quad = [(float(x) - pad, float(y) - pad) for x, y in pred.bounds]
+        return quad, float(pred.confidence)
+    except Exception:  # noqa: BLE001
+        return None, 0.0
+
+
+def rectify_by_quads(samples: list[Sample], cw: int, ch: int, args) -> int:
+    """Warp each crop's estimated plate quad to the fronto-parallel canonical
+    rectangle (pure geometric transform of real pixels — evidentiarily
+    transparent). Applied ONLY when the tilt is significant (see gates
+    above); near-frontal crops keep the plain resize. Returns count."""
+    if getattr(args, 'no_rectify', False):
+        return 0
+    n_rect = 0
+    tilts = []
+    # Detector-confirmed samples only (same idea as ocr_pool, but computed
+    # directly: ocr_pool filters on s.rect which is not set yet at this
+    # point in the pipeline — that filter silently skipped everything).
+    cand = [s for s in samples if s.det_conf >= 0.2]
+    if len(cand) < 5:
+        cand = samples
+    for s in cand:
+        quad, _conf = estimate_quad(s.crop, args)
+        if quad is None:
+            continue
+        tilt = _quad_tilt_deg(quad)
+        if tilt < RECTIFY_MIN_TILT:
+            continue
+        # The quad supplies ORIENTATION only — never crop bounds: WPOD's
+        # quad can under-cover the plate (verified: it clipped 'KH' off a
+        # 'KHE4718' crop and the OCR then misread). The homography that maps
+        # the quad to a level rectangle is applied to the WHOLE crop with an
+        # expanded canvas, so pixels are never cut — the plate just comes
+        # out horizontal inside it.
+        q = np.float32(quad)
+        wt = (np.linalg.norm(q[1] - q[0]) + np.linalg.norm(q[2] - q[3])) / 2
+        ht = (np.linalg.norm(q[3] - q[0]) + np.linalg.norm(q[2] - q[1])) / 2
+        dstq = np.float32([(0, 0), (wt, 0), (wt, ht), (0, ht)])
+        M = cv2.getPerspectiveTransform(q, dstq)
+        hh, ww = s.crop.shape[:2]
+        corners = cv2.perspectiveTransform(
+            np.float32([[(0, 0), (ww, 0), (ww, hh), (0, hh)]]), M)[0]
+        mn = corners.min(axis=0)
+        mx = corners.max(axis=0)
+        T = np.array([[1, 0, -mn[0]], [0, 1, -mn[1]], [0, 0, 1]],
+                     dtype=np.float64)
+        out_w = max(8, int(math.ceil(mx[0] - mn[0])))
+        out_h = max(8, int(math.ceil(mx[1] - mn[1])))
+        levelled = cv2.warpPerspective(s.crop, T @ M.astype(np.float64),
+                                       (out_w, out_h), flags=cv2.INTER_CUBIC,
+                                       borderMode=cv2.BORDER_REPLICATE)
+        s.rect_level = cv2.resize(levelled, (cw, ch),
+                                  interpolation=cv2.INTER_CUBIC)
+        n_rect += 1
+        tilts.append(tilt)
+    if n_rect:
+        log(f'  Ίσιωμα: {n_rect} καρέ απέκτησαν οριζόντια απόδοση '
+            f'(μέση κλίση {sum(tilts) / len(tilts):.1f}°) — ψηφίζουν ΚΑΙ οι '
+            f'δύο εκδοχές, η ψηφοφορία κρίνει')
+    return n_rect
 
 
 # ---------------------------------------------------------------------------
@@ -1103,6 +1264,13 @@ def ocr_and_vote(recognizers, samples, fused_img, args, fused_n=0):
 
     base = [(s.rect, s.sharpness * (0.5 + s.det_conf / 2), f'frame {s.frame_idx}')
             for s in chosen]
+    # Tilt-corrected renderings vote alongside the originals (same weight):
+    # on genuinely oblique plates they read far better (+14-17pp in the
+    # literature), on mild tilt the originals win — per-position voting
+    # arbitrates instead of us guessing per video.
+    base += [(s.rect_level, s.sharpness * (0.5 + s.det_conf / 2),
+              f'frame {s.frame_idx} (level)')
+             for s in chosen if s.rect_level is not None]
     if fused_img is not None:
         # The fused image is our single best evidence (multi-frame denoised);
         # weight it like `fused_boost` average frames so it can outvote a few
@@ -1544,6 +1712,8 @@ def parse_args():
     p.add_argument('--ecc-iters', type=int, default=100,
                    help='ECC alignment iterations (default 100)')
     p.add_argument('--top', type=int, default=5, help='number of candidates to output (default 5)')
+    p.add_argument('--no-rectify', action='store_true',
+                   help='disable WPODNet quad rectification of tilted plates')
     p.add_argument('--no-pattern-prior', action='store_true',
                    help='disable the soft Greek LLL-NNNN format ranking bonus')
     p.add_argument('--no-enhance', action='store_true',

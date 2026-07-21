@@ -13,6 +13,10 @@ clip @ https://github.com/openai/CLIP/archive/refs/heads/main.zip
 # (plate-specialized OCR with per-character confidences). Chosen over Tesseract:
 # purpose-built for plates, runs on CPU via ONNX, confidences needed for voting.
 fast-alpr>=0.4.0
+# WPODNet corner regression: rectifies tilted plates to a frontal view before
+# OCR (measured +14-17pp on oblique plates, ECCV18 ablation). Weights
+# (wpodnet.pth) auto-download to the app models dir on first use.
+wpodnet-pytorch>=1.1.1
 # onnxruntime is an OPTIONAL extra of fast-plate-ocr 1.x — must be listed
 # explicitly here or the OCR/detector models cannot run at all.
 onnxruntime>=1.27.0
