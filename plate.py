@@ -499,6 +499,35 @@ def refine_with_detector(detector, frame, box, pad_ratio=0.6):
         return None, 0.0
     dets = detector.predict(crop)
     if not dets:
+        # Detection retry on a contrast-enhanced rendering (field case: night
+        # IR footage where the plate is a low-contrast/overexposed blob — the
+        # detector sees no character texture on the raw pixels but often does
+        # after CLAHE + mild gamma). CONFIRM-ONLY: a boosted detection may
+        # validate the box the tracker already has (IoU gate below) but never
+        # relocate it — contrast artifacts produce plausible false plates,
+        # and an early version of this retry derailed tracking on the
+        # ground-truth clip by re-anchoring onto them. Crops still come from
+        # the ORIGINAL frame either way.
+        try:
+            lab = cv2.cvtColor(crop, cv2.COLOR_BGR2LAB)
+            clahe = cv2.createCLAHE(clipLimit=3.0, tileGridSize=(8, 8))
+            lab[..., 0] = clahe.apply(lab[..., 0])
+            boosted = cv2.cvtColor(lab, cv2.COLOR_LAB2BGR)
+            # Mild highlight compression pulls near-clipped plates back into
+            # a range where edges reappear.
+            lut = np.array([int(255 * (i / 255.0) ** 1.6)
+                            for i in range(256)], np.uint8)
+            for d in detector.predict(cv2.LUT(boosted, lut)):
+                bb = d.bounding_box
+                cand = (int(bb.x1) + ox, int(bb.y1) + oy,
+                        int(bb.x2 - bb.x1), int(bb.y2 - bb.y1))
+                if iou(cand, box) >= 0.25:
+                    # Confirm the CURRENT box with the boosted confidence —
+                    # geometry stays the tracker's.
+                    return box, float(d.confidence)
+        except Exception:  # noqa: BLE001
+            pass
+    if not dets:
         return None, 0.0
     # Rank by overlap with the current track, then by center distance — when
     # the tracker has drifted clean OFF the plate every IoU is 0, and the
