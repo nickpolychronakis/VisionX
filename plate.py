@@ -902,6 +902,25 @@ def collect_samples(cap, detector, start_frame, roi, args, fps=25.0):
             box = tbox
             lost_streak = 0
             record(frame, box, det_conf)
+            # Sustained-drift guard (user request: "stop and ASK me — the
+            # orange tracker-only phase is unreliable"). CSRT can slide off
+            # the plate while still "succeeding", so hard loss never fires.
+            # If the detector confirmed this track before (≥5 times) and has
+            # now been silent for ~2.5s of video, pause into fix-mode so the
+            # human verifies the box instead of collecting drifted crops.
+            # Footage where the detector NEVER confirms (saturated night
+            # plates) is exempt — there is nothing to "re-confirm" and the
+            # tool would nag forever.
+            if (gui and det_conf == 0 and det_miss >= 60
+                    and sum(1 for s in samples if s.det_conf > 0) >= 5):
+                log(f'  Ο ανιχνευτής έχει να επιβεβαιώσει {det_miss} καρέ — '
+                    f'έλεγξε αν το κουτί είναι ακόμα στην πινακίδα')
+                DEBUG('track', f'det-miss pause @ frame={frame_idx}')
+                det_miss = 0  # one prompt per drift episode, not per frame
+                if correct(frame) == 'stop':
+                    stop_reason = 'finished from fix-mode after det-miss pause'
+                    break
+                continue
         else:
             lost_streak += 1
             if lost_streak > args.lost_tolerance:
