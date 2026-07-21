@@ -112,6 +112,7 @@ K_R = (ord('r'), ord('R'), 961, 929)   # r · ρ · Ρ
 K_F = (ord('f'), ord('F'), 966, 934)   # f · φ · Φ
 K_Q = (ord('q'), ord('Q'), 59)         # q — Greek layout maps the q key to ';'
 K_N = (ord('n'), ord('N'), 957, 925)   # n · ν · Ν — "new segment" prompt
+K_B = (ord('b'), ord('B'), 946, 914)   # b · β · Β — auto-scan for best plate view
 
 
 def _seek_step(key: int) -> int:
@@ -394,7 +395,125 @@ def _seek_bar_strip(w, pos, total):
     return strip
 
 
-def gui_pick_roi(cap, total_frames, fps, start_frame=0):
+def scan_plate_appearances(cap, total_frames, detector, hud_frame=None):
+    """Automatic whole-video plate scan (user request: "why must I hunt for
+    the closest pass manually?"). Probes ~240 evenly-spaced frames with the
+    plate detector on a downscaled copy — small/far plates vanish at the
+    detector's input size, so what survives is exactly the LARGE, readable
+    appearances we want to jump to. Returns [(frame_idx, box, w)] sorted by
+    plate width, largest first."""
+    stride = max(1, total_frames // 120)
+    found = []
+    if hud_frame is not None:
+        dark = (hud_frame * 0.35).astype(np.uint8)
+        _hud(dark, 1, 'SCANNING VIDEO FOR PLATE APPEARANCES...', (0, 255, 255))
+        cv2.imshow(WINDOW, dark)
+        cv2.waitKey(1)
+    log(f'  Σάρωση βίντεο για εμφανίσεις πινακίδας ({total_frames // stride} δείγματα)...')
+    # TILED detection: the detector letterboxes its input to 640px, so on a
+    # full HD/4K frame a 60-100px plate shrinks below detectability (first
+    # version found literally nothing). 800px tiles with 25% overlap keep
+    # plates near their native size.
+    TILE, OVER = 800, 200
+    for idx in range(0, total_frames, stride):
+        frame = seek(cap, idx)
+        if frame is None:
+            continue
+        h, w = frame.shape[:2]
+        per_frame = []
+        for ty in range(0, max(1, h - OVER), TILE - OVER):
+            for tx in range(0, max(1, w - OVER), TILE - OVER):
+                tile = frame[ty:ty + TILE, tx:tx + TILE]
+                if tile.shape[0] < 60 or tile.shape[1] < 60:
+                    continue
+                try:
+                    dets = detector.predict(tile)
+                except Exception:  # noqa: BLE001
+                    continue
+                for d in dets:
+                    if float(d.confidence) < 0.25:
+                        continue
+                    bb = d.bounding_box
+                    box = (int(bb.x1) + tx, int(bb.y1) + ty,
+                           int(bb.x2 - bb.x1), int(bb.y2 - bb.y1))
+                    # Plate geometry gate: without it the widest "find" was
+                    # an 803x704 false positive (a whole car front) that
+                    # hijacked the best-first ranking. Real plates run
+                    # ~1.8-7.5 w/h (GR long plates ≈4.7, square moto ≈2)
+                    # and never approach half the frame width.
+                    aspect = box[2] / max(1, box[3])
+                    if not (1.8 <= aspect <= 7.5) or box[2] > 0.5 * w:
+                        continue
+                    per_frame.append((box, float(d.confidence)))
+        # Overlapping tiles see the same plate twice — keep the widest of
+        # any overlapping pair.
+        per_frame.sort(key=lambda t: -t[0][2])
+        kept = []
+        for box, conf in per_frame:
+            if all(iou(box, kb) < 0.4 for kb, _ in kept):
+                kept.append((box, conf))
+        for box, _conf in kept:
+            found.append((idx, box, box[2]))
+    # Chain appearances into PHYSICAL plates: consecutive-probe boxes that
+    # overlap (or nearly touch) belong to the same vehicle. The b key then
+    # cycles per VEHICLE (each shown at its largest appearance) instead of
+    # through 100+ near-duplicate frames.
+    found.sort(key=lambda t: t[0])
+    clusters = []  # each: {'last': box, 'items': [(idx, box, w)]}
+    for idx, box, bw in found:
+        home = None
+        cx, cy = box[0] + box[2] / 2, box[1] + box[3] / 2
+        for cl in clusters:
+            lb = cl['last']
+            lcx, lcy = lb[0] + lb[2] / 2, lb[1] + lb[3] / 2
+            near = ((lcx - cx) ** 2 + (lcy - cy) ** 2) ** 0.5 < 2.5 * max(box[2], lb[2])
+            if iou(box, lb) > 0.15 or near:
+                home = cl
+                break
+        if home is None:
+            clusters.append({'last': box, 'items': [(idx, box, bw)]})
+        else:
+            home['last'] = box
+            home['items'].append((idx, box, bw))
+    # Burned-in overlays (dashcam logo, timestamps) detect as "plates" but
+    # sit PIXEL-IDENTICAL across the whole video — even a parked car's
+    # plate jitters a little through compression. Field case: the 70mai
+    # watermark ranked #1 and OCR'd as '70100'.
+    def is_static(cl):
+        # Detector boxes around a burned-in logo jitter a few px (the video
+        # behind it changes), so the test is RELATIVE: position/size drift
+        # under ~10% of the width across many appearances. Static clusters
+        # are DERANKED, not dropped — on a fixed camera a parked car is
+        # static too and must stay reachable.
+        if len(cl['items']) < 6:
+            return False
+        xs = [b[0] for _, b, _ in cl['items']]
+        ws = [b[2] for _, b, _ in cl['items']]
+        tol = max(4, 0.1 * (sum(ws) / len(ws)))
+        return (max(xs) - min(xs) <= tol and max(ws) - min(ws) <= tol)
+    moving, static = [], []
+    for cl in clusters:
+        best = max(cl['items'], key=lambda t: t[2])
+        (static if is_static(cl) else moving).append((best, len(cl['items'])))
+    # Single-probe clusters rank BELOW multi-probe ones: a genuinely close
+    # pass shows up in several probes, while borderline logo detections
+    # (conf hovering at the threshold) flicker into ONE probe and — being
+    # huge — hijacked the top spot (field case: 70mai watermark at 416px).
+    moving.sort(key=lambda t: (-(t[1] >= 2), -t[0][2]))
+    static.sort(key=lambda t: -t[0][2])
+    moving = [b for b, _n in moving]
+    static = [b for b, _n in static]
+    if static:
+        log(f'  ({len(static)} στατικές εμφανίσεις — λογότυπα/υπερθέματα ή '
+            f'παρκαρισμένα — μπήκαν στο ΤΕΛΟΣ της λίστας)')
+    found = ([(i, b, w2, False) for i, b, w2 in moving]
+             + [(i, b, w2, True) for i, b, w2 in static])
+    log(f'  Βρέθηκαν {len(found)} εμφανίσεις — b: άλμα στη μεγαλύτερη, '
+        f'ξανά b: επόμενη, ENTER: αποδοχή πλαισίου')
+    return found
+
+
+def gui_pick_roi(cap, total_frames, fps, start_frame=0, detector=None):
     """Selection screen: seek freely AND drag a box around the plate at any
     moment — tracking starts the instant the mouse button is released, with
     no confirmation key (the video starts here directly, per user feedback:
@@ -402,8 +521,9 @@ def gui_pick_roi(cap, total_frames, fps, start_frame=0):
 
     Returns (frame_idx, (x, y, w, h)) or (None, None) on abort.
     """
-    log('\n[Select] drag a box around the plate (any time) · SPACE play/pause · '
-        'a/d ±1 frame · j/l ±25 · seek bar at the bottom · q abort')
+    log('\n[Select] drag a box around the plate (any time) · b = ΑΥΤΟΜΑΤΗ '
+        'εύρεση καλύτερης εμφάνισης · SPACE play/pause · a/d ±1 · j/l ±25 · '
+        'seek bar κάτω · q abort')
 
     cv2.namedWindow(WINDOW, cv2.WINDOW_NORMAL)
     quit_guard = _ConfirmQuit()
@@ -422,6 +542,12 @@ def gui_pick_roi(cap, total_frames, fps, start_frame=0):
 
     drawer = _BoxDrawer(seek_strip=SEEK_BAR_H, frame_h=H, on_seek=on_seek)
     cv2.setMouseCallback(WINDOW, drawer.on_mouse)
+
+    # Auto-scan state (b key): lazily computed plate appearances, largest
+    # first, with the current suggestion drawn for one-key acceptance.
+    suggestions = None
+    sug_i = -1
+    sug_box = None
 
     while True:
         if drawer.start:
@@ -446,6 +572,14 @@ def gui_pick_roi(cap, total_frames, fps, start_frame=0):
         ts = state['pos'] / fps
         _hud(disp, 1, f'frame {state["pos"]}  t={int(ts//60):02d}:{ts%60:05.2f}  '
              f'{"PLAY" if playing else "PAUSE"}  drag box = select plate')
+        if sug_box is not None:
+            sx, sy, sw2, sh2 = sug_box
+            cv2.rectangle(disp, (sx, sy), (sx + sw2, sy + sh2),
+                          (255, 200, 0), _box_thickness(disp))
+            st_lbl = ' [STATIC: logo/parked?]' if state.get('sug_static') else ''
+            _hud(disp, 2, f'AUTO {sug_i + 1}/{len(suggestions)} '
+                 f'w={sug_box[2]}px{st_lbl} - ENTER accept | b next | drag adjust',
+                 (255, 200, 0))
         if quit_guard.pending:
             _hud(disp, 2, 'PRESS q AGAIN TO QUIT', (0, 0, 255))
         # Bar appended BELOW the frame — the full image stays drag-selectable.
@@ -470,8 +604,30 @@ def gui_pick_roi(cap, total_frames, fps, start_frame=0):
             f = seek(cap, state['pos'])
             if f is not None:
                 frame = f
-        elif key in K_ENTER:  # ENTER is gone on purpose — teach the drag gesture
-            log('  (tip: just drag a box around the plate with the mouse)')
+        elif key in K_B and detector is not None:
+            # Auto-scan (user request: the tool should FIND the best view
+            # itself). First press scans the whole video; each press jumps
+            # to the next-largest plate appearance with a ready-made box.
+            if suggestions is None:
+                suggestions = scan_plate_appearances(cap, total_frames,
+                                                     detector, hud_frame=frame)
+                if not suggestions:
+                    log('  Καμία εμφάνιση πινακίδας στη σάρωση — επίλεξε χειροκίνητα')
+            if suggestions:
+                sug_i = (sug_i + 1) % len(suggestions)
+                idx, sbox, _w, sug_static = suggestions[sug_i]
+                playing = False
+                state['pos'] = idx
+                f = seek(cap, idx)
+                if f is not None:
+                    frame = f
+                sug_box = sbox
+                state['sug_static'] = sug_static
+        elif key in K_ENTER:
+            if sug_box is not None:
+                DEBUG('select', f'ROI auto-accept={sug_box} @ frame={state["pos"]}')
+                return state['pos'], sug_box
+            log('  (tip: drag a box with the mouse, or press b for auto-scan)')
 
 
 # ---------------------------------------------------------------------------
@@ -1893,7 +2049,8 @@ def main():
         segments = []
         next_pos = args.start_frame
         while True:
-            seg_start, seg_roi = gui_pick_roi(cap, total_frames, fps, next_pos)
+            seg_start, seg_roi = gui_pick_roi(cap, total_frames, fps, next_pos,
+                                              detector=detector)
             if seg_roi is None:
                 if segments:
                     break  # user aborted the EXTRA pick — analyse what we have
