@@ -231,7 +231,9 @@ const estimatedTimeLeft = computed(() => {
 .live-preview img {
   display: block;
   width: 100%;
-  max-height: 420px;
+  /* Viewport-relative cap: the preview must never grow the card past the
+     window height — that pushed the Cancel button below the fold. */
+  max-height: min(420px, 34vh);
   object-fit: contain;
 }
 

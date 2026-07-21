@@ -564,8 +564,22 @@ function startNew() {
 }
 
 .view-processing {
-  justify-content: center;
   align-items: center;
+  overflow-y: auto;
+  min-height: 0;
+}
+
+/* Vertical centering via auto margins instead of justify-content: center —
+   with justify-center, content taller than the viewport gets its TOP
+   clipped beyond scroll reach (classic flexbox trap); auto margins center
+   when short and scroll correctly when tall. This is what hid the Cancel
+   button once the live preview grew the card. */
+.view-processing > :first-child {
+  margin-top: auto;
+}
+
+.view-processing > :last-child {
+  margin-bottom: auto;
 }
 
 .selected-files h3 {
