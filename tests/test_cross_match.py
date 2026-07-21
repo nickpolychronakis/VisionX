@@ -9,7 +9,8 @@ from pathlib import Path
 import numpy as np
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
-from cross_match import match_videos, plate_match_score  # noqa: E402
+from cross_match import (match_videos, plate_match_score,  # noqa: E402
+                         find_reappearances)
 
 
 def track(cls='car', emb=None, hist=None, plate=None):
@@ -89,6 +90,65 @@ class CrossMatchTest(unittest.TestCase):
         pb = {'gr_candidates': [{'plate': 'YHH3472'}], 'candidates': []}
         # Headlines differ, but the true plate is in A's free list → high.
         self.assertGreaterEqual(plate_match_score(pa, pb), 0.85)
+
+
+class ReappearanceTest(unittest.TestCase):
+    """Same-video re-identification: disjoint-in-time tracks linked by
+    evidence, never merged (annotation only)."""
+
+    @staticmethod
+    def timed(t, first, last, static=False):
+        t.update({'first_seen': first, 'last_seen': last, 'static': static})
+        return t
+
+    def test_plate_link_after_gap(self):
+        tracks = {
+            1: self.timed(track(emb=1, plate=['YHH3472']), 0.0, 10.0),
+            2: self.timed(track(emb=2, hist=2, plate=['YHH3472']), 60.0, 70.0),
+        }
+        pairs = find_reappearances(tracks)
+        self.assertEqual(len(pairs), 1)
+        self.assertEqual((pairs[0]['a'], pairs[0]['b']), (1, 2))
+        self.assertIn('plate', pairs[0]['evidence'])
+        self.assertAlmostEqual(pairs[0]['gap'], 50.0)
+
+    def test_overlapping_tracks_never_link(self):
+        # Both visible at once = two different physical objects.
+        tracks = {
+            1: self.timed(track(emb=1, plate=['YHH3472']), 0.0, 30.0),
+            2: self.timed(track(emb=1, plate=['YHH3472']), 20.0, 50.0),
+        }
+        self.assertEqual(find_reappearances(tracks), [])
+
+    def test_short_gap_is_stitching_territory(self):
+        tracks = {
+            1: self.timed(track(emb=1, plate=['YHH3472']), 0.0, 10.0),
+            2: self.timed(track(emb=1, plate=['YHH3472']), 11.0, 20.0),
+        }
+        self.assertEqual(find_reappearances(tracks), [])
+
+    def test_appearance_only_is_weak_evidence(self):
+        tracks = {
+            1: self.timed(track(emb=3, hist=3), 0.0, 5.0),
+            2: self.timed(track(emb=3, hist=3), 30.0, 40.0),
+        }
+        pairs = find_reappearances(tracks)
+        self.assertEqual(len(pairs), 1)
+        self.assertEqual(pairs[0]['evidence'], 'appearance')
+
+    def test_two_static_tracks_do_not_reappear(self):
+        tracks = {
+            1: self.timed(track(emb=1, plate=['YHH3472']), 0.0, 10.0, static=True),
+            2: self.timed(track(emb=1, plate=['YHH3472']), 60.0, 70.0, static=True),
+        }
+        self.assertEqual(find_reappearances(tracks), [])
+
+    def test_class_mismatch_never_links(self):
+        tracks = {
+            1: self.timed(track(cls='car', emb=1), 0.0, 10.0),
+            2: self.timed(track(cls='person', emb=1), 60.0, 70.0),
+        }
+        self.assertEqual(find_reappearances(tracks), [])
 
 
 if __name__ == '__main__':

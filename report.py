@@ -129,6 +129,24 @@ def generate_report(tracks: dict, output_dir: str, video_name: str, video_path: 
         if attrs_html:
             attrs_html = f'<div class="attrs">{attrs_html}</div>'
 
+        # Possible same-video re-appearances (vehicle/person left and came
+        # back): link the two cards with the evidence tier spelled out.
+        # Annotation only — merging over a long gap is the investigator's
+        # call, never the algorithm's.
+        reapp_html = ''
+        _EVIDENCE_EL = {'plate': 'πινακίδα',
+                        'plate+appearance': 'πινακίδα + εμφάνιση',
+                        'appearance': 'μόνο εμφάνιση — χαμηλή βεβαιότητα'}
+        for r in track.get('reappearance') or []:
+            when = ('νωρίτερα' if r.get('when') == 'earlier' else 'αργότερα')
+            ev = _EVIDENCE_EL.get(r.get('evidence'), r.get('evidence', ''))
+            weak = r.get('evidence') == 'appearance'
+            cls_extra = ' weak' if weak else ''
+            reapp_html += (
+                f'<div class="reapp{cls_extra}">&#128257; Πιθανή επανεμφάνιση: '
+                f'ίδιο με #{r["other"]} ({when}, κενό {r.get("gap", 0):.0f}s) '
+                f'&middot; απόδειξη: {html_mod.escape(ev)}</div>')
+
         # Best face shots (person tracks): extraction only, for human review.
         faces_html = ''
         for k, face in enumerate(track.get('faces') or []):
@@ -169,7 +187,7 @@ def generate_report(tracks: dict, output_dir: str, video_name: str, video_path: 
             </div>
             <div class="info">
                 <div class="title">{title_esc} #{track_id} {badges}</div>
-                {attrs_html}{plate_html}{faces_html}
+                {attrs_html}{plate_html}{reapp_html}{faces_html}
                 <div class="confidence">Confidence: {track['confidence']:.0%}</div>
                 <div class="meta">
                     <span class="direction" title="Direction">{direction}</span>
@@ -294,6 +312,13 @@ def generate_report(tracks: dict, output_dir: str, video_name: str, video_path: 
         }}
         .platechip.uncertain:hover {{ background: #3a2d1a; }}
         .plate-alts {{ color: #fbbf24; font-size: 0.78em; margin: 0 0 4px; }}
+        .reapp {{
+            display: inline-block; font-size: 0.8em; margin: 2px 0 4px;
+            padding: 3px 8px; border-radius: 8px;
+            border: 1px solid #38bdf8; color: #7dd3fc;
+            background: rgba(56, 189, 248, 0.08);
+        }}
+        .reapp.weak {{ border-style: dashed; color: #94a3b8; border-color: #64748b; }}
         .pscore {{ font-size: 0.75em; color: #555; letter-spacing: 0; }}
         .deepchip {{
             cursor: copy; margin-left: 6px; color: #7dd3fc; font-size: 1.1em;

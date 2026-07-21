@@ -155,6 +155,34 @@ def run_prompt_filter(tracks: dict, cfg: dict, args, json_progress: bool):
         log_stderr(f'Filtering failed ({e})')
 
 
+def run_reappearance(tracks: dict, json_progress: bool):
+    """Annotate possible same-video re-appearances (vehicle/person left and
+    came back). Runs AFTER plates (strong evidence needs candidate lists)
+    and BEFORE prepare_for_report (appearance needs the _emb_* embeddings
+    that stitching left on the tracks). Annotation-only by design — the
+    report links the cards, the investigator decides."""
+    if len(tracks) < 2:
+        return
+    try:
+        from cross_match import find_reappearances
+        pairs = find_reappearances(tracks)
+        for p in pairs:
+            tracks[p['a']].setdefault('reappearance', []).append(
+                {'other': p['b'], 'when': 'later', 'gap': p['gap'],
+                 'score': p['score'], 'evidence': p['evidence']})
+            tracks[p['b']].setdefault('reappearance', []).append(
+                {'other': p['a'], 'when': 'earlier', 'gap': p['gap'],
+                 'score': p['score'], 'evidence': p['evidence']})
+        if pairs:
+            log_stderr(f'Re-appearance: {len(pairs)} possible same-object '
+                       f'pair(s) flagged')
+            if json_progress:
+                emit_json('status',
+                          message=f'Πιθανές επανεμφανίσεις: {len(pairs)}')
+    except Exception as e:  # noqa: BLE001 — annotation must never kill a run
+        log_stderr(f'Re-appearance pass failed ({e})')
+
+
 def run_auto_plates(tracks: dict, cfg: dict, json_progress: bool,
                     fps: float | None = None, video_path: str | None = None):
     """Attach plate candidates to vehicle tracks (in place). Failures only
@@ -681,6 +709,7 @@ def process_video(source: str, yolo: YOLO, cfg: dict, args, video_index: int = 1
     run_auto_plates(tracks, cfg, json_progress, fps=fps, video_path=source)
     run_face_shots(tracks, cfg, json_progress)
     run_attributes(tracks, cfg, json_progress)
+    run_reappearance(tracks, json_progress)
     run_prompt_filter(tracks, cfg, args, json_progress)
 
     log_stderr(f'Processing complete: {source_path.name} — {n_raw} tracklets '

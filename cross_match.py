@@ -88,6 +88,46 @@ def pair_score(ta: dict, tb: dict) -> tuple | None:
     return None
 
 
+def find_reappearances(tracks: dict) -> list:
+    """Same-video re-identification: pairs of tracks (same class) whose time
+    intervals are DISJOINT — one left the scene, the other appeared later —
+    but whose evidence says they may be the same physical object (a vehicle
+    that leaves and returns, a person walking back into frame).
+
+    Deliberately an ANNOTATION, never a merge: identity across a long gap is
+    a human call (evidentiary caution), so the report links the two cards and
+    the investigator judges. Evidence tiers mirror cross-video matching:
+    plate-candidate agreement is strong, appearance alone is weak.
+
+    Returns [{'a': earlier_tid, 'b': later_tid, 'gap': sec, 'score', 'evidence'}]
+    sorted best-first.
+    """
+    pairs = []
+    for (ia, ta), (ib, tb) in itertools.combinations(list(tracks.items()), 2):
+        if ta['class'] != tb['class']:
+            continue
+        # Real absence gate: overlap means two different objects (the tracker
+        # saw both at once); gaps under ~3s are ordinary tracking dropouts —
+        # stitching's territory — not a genuine departure+return.
+        gap = (max(ta['first_seen'], tb['first_seen'])
+               - min(ta['last_seen'], tb['last_seen']))
+        if gap < 3.0:
+            continue
+        # Two static tracks don't "reappear" — a parked car split in two is
+        # stitching's job (same-spot merge), not a departure.
+        if ta.get('static') and tb.get('static'):
+            continue
+        scored = pair_score(ta, tb)
+        if scored is None:
+            continue
+        score, evidence = scored
+        a, b = (ia, ib) if ta['first_seen'] <= tb['first_seen'] else (ib, ia)
+        pairs.append({'a': a, 'b': b, 'gap': round(gap, 1),
+                      'score': score, 'evidence': evidence})
+    pairs.sort(key=lambda p: -p['score'])
+    return pairs
+
+
 def match_videos(per_video: dict) -> list:
     """per_video: {video_name: tracks_dict (pre-report, with _emb_* intact)}.
 

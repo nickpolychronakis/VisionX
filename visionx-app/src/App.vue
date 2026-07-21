@@ -403,8 +403,9 @@ function startNew() {
 
         <label v-if="selectedFiles.length > 1" class="match-toggle">
           <input type="checkbox" v-model="matchMode" />
-          <span>Ίδιο συμβάν από πολλές κάμερες — αντιστοίχιση αντικειμένων
-          μεταξύ των βίντεο (+ συγκεντρωτική αναφορά)</span>
+          <span>Αντιστοίχιση αντικειμένων μεταξύ των βίντεο — ίδιο συμβάν από
+          πολλές κάμερες Ή άφιξη/αναχώρηση σε διαφορετικά βίντεο· δεν
+          απαιτείται συγχρονισμός καμερών (+ συγκεντρωτική αναφορά)</span>
         </label>
 
         <div v-if="selectedFiles.length > 0" class="actions">
