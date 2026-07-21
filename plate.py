@@ -1248,9 +1248,35 @@ def beam_candidates(dists: list, top_n: int):
 # Phase 6 — output
 # ---------------------------------------------------------------------------
 
+def assess_readability(candidates, reads):
+    """Verdict on whether the footage carried readable plate text AT ALL.
+
+    Field case that forced this: a night clip with the retroreflective plate
+    fully saturated (pure white) — every OCR read returned empty text, yet
+    the vote still ranked stray-position noise ('?????3'), and the Greek
+    projection dressed that noise up as plausible-looking plates. An
+    investigator must never mistake fabricated structure for a reading, so
+    the verdict travels with every output (terminal, JSON, HTML report).
+
+    Returns (level, reason): level ∈ 'ok' | 'low' | 'none'.
+    """
+    text_reads = sum(1 for r in reads if r.get('text'))
+    if text_reads == 0:
+        return 'none', ('Καμία ανάγνωση OCR δεν επέστρεψε χαρακτήρες — η '
+                        'πινακίδα είναι κορεσμένη/υπερεκτεθειμένη, πολύ μικρή '
+                        'ή εκτός εστίασης σε όλα τα καρέ')
+    top = candidates[0] if candidates else None
+    known = len(top.plate.replace('?', '')) if top else 0
+    if top is None or known < 3 or top.score < 0.45 or text_reads < 3:
+        return 'low', (f'Ελάχιστες αξιοποιήσιμες αναγνώσεις ({text_reads}) '
+                       f'ή πολύ αβέβαιη κορυφαία υποψήφια — χρησιμοποιήστε '
+                       f'τις λίστες μόνο ως αχνή ένδειξη')
+    return 'ok', ''
+
+
 def save_outputs(video_path, out_dir, samples, ref, fused_img, candidates, reads,
                  region_votes, roi, start_frame, fps, args, fused_n=0,
-                 gr_candidates=()):
+                 gr_candidates=(), readability=('ok', '')):
     out = Path(out_dir)
     out.mkdir(parents=True, exist_ok=True)
 
@@ -1323,8 +1349,13 @@ def save_outputs(video_path, out_dir, samples, ref, fused_img, candidates, reads
             for c in gr_candidates
         ],
         'individual_reads': reads,
+        'readability': readability[0],
+        'readability_note': readability[1],
         'note': 'Candidate list for investigative DB search — not evidentiary. '
-                'Scores are relative rankings, not calibrated probabilities.',
+                'Scores are relative rankings, not calibrated probabilities.'
+                + (' ΠΡΟΣΟΧΗ: readability=none — οι λίστες είναι στατιστικός '
+                   'θόρυβος, ΜΗΝ χρησιμοποιηθούν για αναζήτηση.'
+                   if readability[0] == 'none' else ''),
     }
     json_path = out / 'candidates.json'
     # utf-8 + ensure_ascii=False: same Windows cp1252 pitfall found in
@@ -1389,12 +1420,22 @@ def save_outputs(video_path, out_dir, samples, ref, fused_img, candidates, reads
 
 
 def print_results(candidates, gr_candidates, reads, region_votes, n_samples,
-                  aligned, fused_n):
+                  aligned, fused_n, readability=('ok', '')):
     """Print the summary AND return it as lines, so main() can also save it
     as summary.txt in the output folder (user request: the report must live
     with the rest of the artifacts, in copy-pasteable text form too)."""
-    lines = [f'Tracked {n_samples} frames, ECC-aligned {aligned}, '
-             f'fusion {f"of {fused_n} frames" if fused_n else "skipped (too few well-aligned frames)"}']
+    lines = []
+    if readability[0] == 'none':
+        lines += ['!' * 62,
+                  '!!  ΜΗ ΑΝΑΓΝΩΣΙΜΗ ΠΙΝΑΚΙΔΑ',
+                  f'!!  {readability[1]}.',
+                  '!!  Οι παρακάτω λίστες είναι ΣΤΑΤΙΣΤΙΚΟΣ ΘΟΡΥΒΟΣ — μην',
+                  '!!  χρησιμοποιηθούν για αναζήτηση σε βάση δεδομένων.',
+                  '!' * 62, '']
+    elif readability[0] == 'low':
+        lines += [f'ΠΡΟΣΟΧΗ — χαμηλή αξιοπιστία: {readability[1]}.', '']
+    lines += [f'Tracked {n_samples} frames, ECC-aligned {aligned}, '
+              f'fusion {f"of {fused_n} frames" if fused_n else "skipped (too few well-aligned frames)"}']
     if region_votes:
         lines.append(f'Region hint: {max(region_votes, key=region_votes.get)}')
     lines.append('')
@@ -1587,18 +1628,20 @@ def main():
               f'OCR: {n_pool} crops x {len(recognizers)} models')
     candidates, gr_candidates, reads, region_votes = ocr_and_vote(
         recognizers, samples, fused_img, args, fused_n=fused_n)
+    readability = assess_readability(candidates, reads)
 
     show_busy(busy_frame, 4, 'writing the report')
     out_dir = args.output or str(video_path.parent / f'{video_path.stem}_plate')
     json_path, report_path = save_outputs(
         video_path, out_dir, samples, ref, fused_img, candidates,
         reads, region_votes, roi, start_frame, fps, args,
-        fused_n=fused_n, gr_candidates=gr_candidates)
+        fused_n=fused_n, gr_candidates=gr_candidates, readability=readability)
     if not args.no_gui:
         cv2.destroyAllWindows()
 
     summary = print_results(candidates, gr_candidates, reads, region_votes,
-                            len(samples), aligned, fused_n)
+                            len(samples), aligned, fused_n,
+                            readability=readability)
     # Plain-text copy of the console summary, saved with the artifacts.
     with open(Path(out_dir) / 'summary.txt', 'w', encoding='utf-8') as f:
         f.write(f'Video: {video_path}\nROI: {roi} @ frame {start_frame}\n')
