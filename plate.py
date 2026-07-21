@@ -206,6 +206,7 @@ class Sample:
     rect: np.ndarray = None     # canonical rectified BGR crop (filled later)
     aligned: np.ndarray = None  # ECC-aligned version of rect (None if ECC failed)
     ecc_cc: float = 0.0         # ECC correlation vs reference (alignment quality)
+    sat_ratio: float = 0.0      # fraction of clipped (>=250) pixels — burned plate
 
 
 @dataclass
@@ -607,7 +608,8 @@ def collect_samples(cap, detector, start_frame, roi, args, fps=25.0):
         cw, ch = canonical_size(w, h)
         gray = cv2.cvtColor(cv2.resize(crop, (cw, ch), interpolation=cv2.INTER_CUBIC),
                             cv2.COLOR_BGR2GRAY)
-        samples.append(Sample(frame_idx, cb, crop, laplacian_sharpness(gray), conf))
+        samples.append(Sample(frame_idx, cb, crop, laplacian_sharpness(gray), conf,
+                              sat_ratio=float((gray >= 250).mean())))
         return True
 
     def reseed(fr, b):
@@ -947,10 +949,31 @@ def fuse(samples: list[Sample], top_k: int) -> tuple:
         return None, 0
     weights = np.array([s.sharpness ** 2 for s in chosen], dtype=np.float64)
     weights /= weights.sum()
+    # Saturation-masked accumulation (user request, forensic rationale): a
+    # clipped pixel (>=250 gray) carries no scene information, so each pixel
+    # position averages ONLY the frames where it isn't burned. When the
+    # blown-out region moves across frames (car passes through the light
+    # beam), the full plate can assemble itself from the valid parts — pure
+    # arithmetic on real pixels, no synthesis. Positions clipped in EVERY
+    # frame fall back to the plain weighted mean (stay white).
     acc = np.zeros(chosen[0].aligned.shape, dtype=np.float64)
+    plain = np.zeros(chosen[0].aligned.shape, dtype=np.float64)
+    wacc = np.zeros(chosen[0].aligned.shape, dtype=np.float64)
     for s, w in zip(chosen, weights):
-        acc += s.aligned.astype(np.float64) * w
-    fused = np.clip(acc, 0, 255).astype(np.uint8)
+        img = s.aligned.astype(np.float64)
+        valid = (cv2.cvtColor(s.aligned, cv2.COLOR_BGR2GRAY) < 250
+                 ).astype(np.float64)[..., None]
+        acc += img * w * valid
+        wacc += w * valid
+        plain += img * w
+    fused = np.where(wacc > 1e-9, acc / np.maximum(wacc, 1e-9), plain)
+    fused = np.clip(fused, 0, 255).astype(np.uint8)
+    coverage = float((wacc[..., 0] > 1e-9).mean())
+    if coverage < 0.995:
+        log(f'  Fusion με μάσκα κορεσμού: {coverage:.0%} των pixel είχαν '
+            f'τουλάχιστον ένα μη-κορεσμένο καρέ'
+            + (' — οι λευκές περιοχές είναι καμένες σε ΟΛΑ τα καρέ'
+               if coverage < 0.9 else ''))
     # Mild unsharp mask: fusion slightly softens edges (residual sub-pixel
     # error); 0.5 amount restores stroke contrast without ringing. This is
     # light enhancement on REAL averaged pixels — no generative model.
@@ -1061,7 +1084,10 @@ def ocr_pool(samples, max_frames):
     det_pool = [s for s in pool if s.det_conf >= 0.2]
     if len(det_pool) >= 5:
         pool = det_pool
-    pool.sort(key=lambda s: s.sharpness, reverse=True)
+    # (1 - sat_ratio): a mostly-burned crop has nothing for OCR to read, so
+    # partially/un-saturated frames outrank it. For normal footage
+    # (sat_ratio ~0) the ordering is unchanged.
+    pool.sort(key=lambda s: s.sharpness * (1.0 - s.sat_ratio), reverse=True)
     return pool[:max_frames] if max_frames else pool
 
 
@@ -1248,7 +1274,7 @@ def beam_candidates(dists: list, top_n: int):
 # Phase 6 — output
 # ---------------------------------------------------------------------------
 
-def assess_readability(candidates, reads):
+def assess_readability(candidates, reads, samples=()):
     """Verdict on whether the footage carried readable plate text AT ALL.
 
     Field case that forced this: a night clip with the retroreflective plate
@@ -1262,9 +1288,26 @@ def assess_readability(candidates, reads):
     """
     text_reads = sum(1 for r in reads if r.get('text'))
     if text_reads == 0:
-        return 'none', ('Καμία ανάγνωση OCR δεν επέστρεψε χαρακτήρες — η '
-                        'πινακίδα είναι κορεσμένη/υπερεκτεθειμένη, πολύ μικρή '
-                        'ή εκτός εστίασης σε όλα τα καρέ')
+        # Saturation forensics: distinguish "burned everywhere" (nothing to
+        # do in THIS footage) from "some partially-burned frames exist"
+        # (worth pointing the user at them / at other segments).
+        sats = [s.sat_ratio for s in samples] if samples else []
+        if sats and min(sats) >= 0.5:
+            reason = (f'Η πινακίδα είναι κορεσμένη (καμένη από το φως) σε '
+                      f'ΟΛΑ τα καρέ — μέσος κορεσμός {sum(sats)/len(sats):.0%}. '
+                      f'Σε αυτό το υλικό δεν υπάρχει ανακτήσιμη πληροφορία· '
+                      f'δοκιμάστε σημείο όπου η πινακίδα είναι εκτός δέσμης '
+                      f'φωτός (π.χ. σε στροφή) ή άλλη κάμερα')
+        elif sats and any(v < 0.5 for v in sats):
+            n_ok = sum(1 for v in sats if v < 0.5)
+            reason = (f'Καμία ανάγνωση OCR δεν επέστρεψε χαρακτήρες, αν και '
+                      f'{n_ok} καρέ έχουν μερικό μόνο κορεσμό — πιθανόν πολύ '
+                      f'μικρή/θολή πινακίδα· δείτε το φύλλο καρέ (ένδειξη SAT)')
+        else:
+            reason = ('Καμία ανάγνωση OCR δεν επέστρεψε χαρακτήρες — η '
+                      'πινακίδα είναι κορεσμένη/υπερεκτεθειμένη, πολύ μικρή '
+                      'ή εκτός εστίασης σε όλα τα καρέ')
+        return 'none', reason
     top = candidates[0] if candidates else None
     known = len(top.plate.replace('?', '')) if top else 0
     if top is None or known < 3 or top.score < 0.45 or text_reads < 3:
@@ -1312,7 +1355,8 @@ def save_outputs(video_path, out_dir, samples, ref, fused_img, candidates, reads
             r, c = divmod(i, cols)
             y0 = r * (ch + label_h)
             sheet[y0:y0 + ch, c * cw:c * cw + cw] = s.rect
-            cv2.putText(sheet, f'f{s.frame_idx} sh={s.sharpness:.0f} cc={s.ecc_cc:.2f}',
+            sat_lbl = f' SAT{s.sat_ratio:.0%}' if s.sat_ratio >= 0.2 else ''
+            cv2.putText(sheet, f'f{s.frame_idx} sh={s.sharpness:.0f} cc={s.ecc_cc:.2f}{sat_lbl}',
                         (c * cw + 4, y0 + ch + 15),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.45, (0, 255, 255), 1, cv2.LINE_AA)
             read = ocr_by_frame.get(s.frame_idx)
@@ -1628,7 +1672,7 @@ def main():
               f'OCR: {n_pool} crops x {len(recognizers)} models')
     candidates, gr_candidates, reads, region_votes = ocr_and_vote(
         recognizers, samples, fused_img, args, fused_n=fused_n)
-    readability = assess_readability(candidates, reads)
+    readability = assess_readability(candidates, reads, samples)
 
     show_busy(busy_frame, 4, 'writing the report')
     out_dir = args.output or str(video_path.parent / f'{video_path.stem}_plate')
