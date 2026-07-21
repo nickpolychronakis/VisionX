@@ -546,11 +546,22 @@ def process_video(source: str, yolo: YOLO, cfg: dict, args, video_index: int = 1
 
     # Get video info
     cap = cv2.VideoCapture(source)
+    if not cap.isOpened():
+        # Unreadable input (missing codec, corrupt file, or not a video at
+        # all). Clean skip with a user-facing message — this used to crash
+        # with UnboundLocalError further down.
+        cap.release()
+        log_stderr(f'Skipping {source_path.name}: could not open as video')
+        if json_progress:
+            emit_json('status', message=f'Παράβλεψη {source_path.name}: '
+                                        f'δεν αναγνωρίζεται ως βίντεο')
+        return None, None
     total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
     fps_metadata = cap.get(cv2.CAP_PROP_FPS)
 
     # Calculate actual fps (metadata is often wrong for security cameras)
     frames_to_check = 0
+    pos_sec = 0.0  # stays 0 when not a single frame decodes (bad stream)
     while frames_to_check < 100:
         ret, _ = cap.read()
         if not ret:
@@ -572,7 +583,7 @@ def process_video(source: str, yolo: YOLO, cfg: dict, args, video_index: int = 1
         log_stderr(f'Skipping {source_path.name}: could not read video (0 frames detected)')
         if json_progress:
             emit_json('status', message=f'Παράβλεψη {source_path.name}: δεν μπόρεσε να αναγνωριστεί')
-        return None
+        return None, None
 
     # Output directory for YOLO (only if saving video/crops)
     output_dir = args.output or str(source_path.parent)
@@ -1000,6 +1011,19 @@ def _parallel_worker(worker_args: dict) -> str | None:
     return report_path
 
 
+# Common video formats (dav = Dahua DVR format)
+VIDEO_EXTENSIONS = ['mp4', 'm4v', 'avi', 'mov', 'mkv', 'wmv', 'flv', 'webm',
+                    'mpeg', 'mpg', 'ts', 'mts', 'm2ts', '3gp', 'asf', 'dav']
+
+
+def _videos_in_dir(dir_path: Path) -> list[str]:
+    found = []
+    for ext in VIDEO_EXTENSIONS:
+        found.extend(dir_path.glob(f'*.{ext}'))
+        found.extend(dir_path.glob(f'*.{ext.upper()}'))
+    return [str(f) for f in sorted(set(found))]
+
+
 def main():
     parser = argparse.ArgumentParser(
         description='VisionX - YOLOE-26 Video Analysis',
@@ -1109,31 +1133,23 @@ Examples:
     if args.dir:
         dir_path = Path(args.dir)
         if dir_path.is_dir():
-            # Support common video formats (lowercase and uppercase)
-            extensions = [
-                'mp4', 'MP4', 'm4v', 'M4V',
-                'avi', 'AVI',
-                'mov', 'MOV',
-                'mkv', 'MKV',
-                'wmv', 'WMV',
-                'flv', 'FLV',
-                'webm', 'WEBM',
-                'mpeg', 'MPEG', 'mpg', 'MPG',
-                'ts', 'TS', 'mts', 'MTS', 'm2ts', 'M2TS',
-                '3gp', '3GP',
-                'asf', 'ASF',
-                'dav', 'DAV',  # Dahua DVR format
-            ]
-            video_files = []
-            for ext in extensions:
-                video_files.extend(dir_path.glob(f'*.{ext}'))
-            video_files = [str(f) for f in sorted(set(video_files))]
+            video_files = _videos_in_dir(dir_path)
         else:
             print(f'Error: {args.dir} is not a directory')
             return
 
-    if args.source:
-        video_files.extend(args.source)
+    for src in (args.source or []):
+        # A directory passed as a source (e.g. the app's folder picker, or a
+        # CLI glob that matched a folder) expands to the videos inside it —
+        # feeding the raw folder path to OpenCV used to crash mid-run.
+        if Path(src).is_dir():
+            found = _videos_in_dir(Path(src))
+            if found:
+                video_files.extend(found)
+            else:
+                log_stderr(f'{src}: folder contains no video files — skipped')
+        else:
+            video_files.append(src)
 
     if not video_files:
         # Exit non-zero so the desktop app surfaces this as an error instead

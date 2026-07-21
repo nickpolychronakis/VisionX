@@ -547,6 +547,39 @@ fn show_in_folder(path: String) -> Result<(), String> {
     Ok(())
 }
 
+/// Video formats accepted by the pipeline (kept in sync with vision.py's
+/// VIDEO_EXTENSIONS; dav = Dahua DVR format).
+const VIDEO_EXTS: [&str; 16] = ["mp4", "m4v", "avi", "mov", "mkv", "wmv",
+    "flv", "webm", "mpeg", "mpg", "ts", "mts", "m2ts", "3gp", "asf", "dav"];
+
+/// List the video files directly inside a folder. Used by the folder picker
+/// and by drag-and-drop of a directory, so the UI always holds individual
+/// files (each visible and removable) — passing a raw folder path down to
+/// OpenCV used to fail mid-processing.
+#[tauri::command]
+fn list_videos_in_dir(dir: String) -> Result<Vec<String>, String> {
+    let path = std::path::Path::new(&dir);
+    if !path.is_dir() {
+        return Err(format!("Not a directory: {}", dir));
+    }
+    let entries = std::fs::read_dir(path)
+        .map_err(|e| format!("Cannot read folder: {}", e))?;
+    let mut videos: Vec<String> = entries
+        .filter_map(|e| e.ok())
+        .map(|e| e.path())
+        .filter(|p| p.is_file())
+        .filter(|p| {
+            p.extension()
+                .and_then(|s| s.to_str())
+                .map(|ext| VIDEO_EXTS.contains(&ext.to_lowercase().as_str()))
+                .unwrap_or(false)
+        })
+        .map(|p| p.to_string_lossy().to_string())
+        .collect();
+    videos.sort();
+    Ok(videos)
+}
+
 /// Launch the interactive license-plate tool (plate.py) on a video. It opens
 /// its own native OpenCV window for ROI selection + tracking, so we spawn it
 /// detached and return immediately (the app stays usable meanwhile).
@@ -764,6 +797,7 @@ fn main() {
             open_file,
             show_in_folder,
             run_plate_tool,
+            list_videos_in_dir,
             // Updates
             check_for_updates,
             install_update,

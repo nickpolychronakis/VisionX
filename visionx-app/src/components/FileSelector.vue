@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { ref, onMounted, onUnmounted } from "vue";
 import { open } from "@tauri-apps/plugin-dialog";
+import { invoke } from "@tauri-apps/api/core";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 
 const emit = defineEmits<{
@@ -8,7 +9,32 @@ const emit = defineEmits<{
 }>();
 
 const isDragging = ref(false);
+// Feedback when a picked/dropped folder yields no videos — otherwise the
+// user's click appears to do nothing.
+const folderNote = ref("");
 let unlisten: (() => void) | null = null;
+
+const videoExtensions = ['mp4', 'avi', 'mov', 'mkv', 'wmv', 'flv', 'webm', 'm4v', 'mpeg', 'mpg', '3gp', 'ts', 'mts', 'bin', 'dav'];
+
+// Expand any directories among the paths into the video files inside them;
+// keep direct video files as-is. The list always ends up holding individual
+// files — a raw folder path used to reach OpenCV and fail mid-processing.
+async function expandPaths(paths: string[]): Promise<string[]> {
+  const files: string[] = [];
+  for (const p of paths) {
+    const ext = p.split('.').pop()?.toLowerCase();
+    if (ext && videoExtensions.includes(ext) && !p.endsWith('/')) {
+      files.push(p);
+      continue;
+    }
+    try {
+      files.push(...await invoke<string[]>("list_videos_in_dir", { dir: p }));
+    } catch {
+      // Not a directory and not a known video extension — ignore.
+    }
+  }
+  return files;
+}
 
 onMounted(async () => {
   const appWindow = getCurrentWindow();
@@ -21,15 +47,12 @@ onMounted(async () => {
       isDragging.value = false;
       const paths = event.payload.paths;
       if (paths && paths.length > 0) {
-        // Filter for video files
-        const videoExtensions = ['mp4', 'avi', 'mov', 'mkv', 'wmv', 'flv', 'webm', 'm4v', 'mpeg', 'mpg', '3gp', 'ts', 'mts', 'bin', 'dav'];
-        const videoFiles = paths.filter(p => {
-          const ext = p.split('.').pop()?.toLowerCase();
-          return ext && videoExtensions.includes(ext);
+        expandPaths(paths).then((videoFiles) => {
+          folderNote.value = videoFiles.length > 0
+            ? ""
+            : "Δεν βρέθηκαν αρχεία βίντεο σε ό,τι αποθέσατε.";
+          if (videoFiles.length > 0) emit("filesSelected", videoFiles);
         });
-        if (videoFiles.length > 0) {
-          emit("filesSelected", videoFiles);
-        }
       }
     } else if (event.payload.type === 'leave') {
       isDragging.value = false;
@@ -68,10 +91,17 @@ async function selectFolder() {
       directory: true,
     });
     if (folder) {
-      emit("filesSelected", [folder as string]);
+      const videos = await invoke<string[]>("list_videos_in_dir", {
+        dir: folder as string,
+      });
+      folderNote.value = videos.length > 0
+        ? ""
+        : "Ο φάκελος δεν περιέχει αρχεία βίντεο.";
+      if (videos.length > 0) emit("filesSelected", videos);
     }
   } catch (e) {
     console.error("Failed to open folder dialog:", e);
+    folderNote.value = "Αποτυχία ανάγνωσης του φακέλου.";
   }
 }
 </script>
@@ -92,6 +122,7 @@ async function selectFolder() {
       <button class="secondary" @click="selectFolder">Επιλογή Φακέλου</button>
     </div>
     <p class="formats">Υποστηρίζονται: MP4, AVI, MOV, MKV, WMV, WebM και άλλα</p>
+    <p v-if="folderNote" class="folder-note">{{ folderNote }}</p>
   </div>
 </template>
 
@@ -141,5 +172,11 @@ async function selectFolder() {
 .formats {
   font-size: 0.7rem;
   color: var(--text-secondary);
+}
+
+.folder-note {
+  margin-top: 8px;
+  font-size: 0.8rem;
+  color: var(--danger);
 }
 </style>
