@@ -332,7 +332,15 @@ function startNew() {
 </script>
 
 <template>
-  <div class="app" :class="{ 'view-compact': currentView !== 'results' }">
+  <!-- Compact (900px) layout for form-like views; processing and results
+       spread across the whole window (live preview / report deserve it). -->
+  <div
+    class="app"
+    :class="{
+      'view-compact':
+        currentView !== 'results' && currentView !== 'processing',
+    }"
+  >
     <header class="header">
       <div class="header-content">
         <h1>VisionX</h1>
@@ -564,22 +572,23 @@ function startNew() {
 }
 
 .view-processing {
-  align-items: center;
+  align-items: stretch;
   overflow-y: auto;
+  min-height: 0;
+  flex: 1;
+}
+
+/* The progress card fills the window (user request: use the whole space —
+   the live preview grows inside it); Cancel keeps its natural height below.
+   min-height: 0 lets the card actually shrink/scroll on small windows
+   instead of pushing Cancel past the fold. */
+.view-processing .progress-container {
+  flex: 1;
   min-height: 0;
 }
 
-/* Vertical centering via auto margins instead of justify-content: center —
-   with justify-center, content taller than the viewport gets its TOP
-   clipped beyond scroll reach (classic flexbox trap); auto margins center
-   when short and scroll correctly when tall. This is what hid the Cancel
-   button once the live preview grew the card. */
-.view-processing > :first-child {
-  margin-top: auto;
-}
-
-.view-processing > :last-child {
-  margin-bottom: auto;
+.view-processing .actions {
+  flex-shrink: 0;
 }
 
 .selected-files h3 {

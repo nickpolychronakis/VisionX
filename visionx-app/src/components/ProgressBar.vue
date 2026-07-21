@@ -195,6 +195,9 @@ const estimatedTimeLeft = computed(() => {
   align-items: center;
   padding: 40px 20px;
   text-align: center;
+  /* The card fills the window during processing — keep the init spinner
+     vertically centered in it instead of top-stuck. */
+  margin-block: auto;
 }
 
 .spinner {
@@ -226,16 +229,23 @@ const estimatedTimeLeft = computed(() => {
   overflow: hidden;
   border: 1px solid var(--border);
   background: #000;
+  /* Grow into whatever height the card offers (the card fills the window
+     during processing) — the flex bound replaces the old 34vh cap, and
+     min-height: 0 keeps Cancel reachable on small windows. */
+  flex: 1;
+  min-height: 120px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
 }
 
 .live-preview img {
   display: block;
-  width: 100%;
-  /* Viewport-relative cap: the preview must never grow the card past the
-     window height — that pushed the Cancel button below the fold. */
-  max-height: min(420px, 34vh);
+  max-width: 100%;
+  max-height: 100%;
   object-fit: contain;
 }
+
 
 .live-badge {
   position: absolute;
