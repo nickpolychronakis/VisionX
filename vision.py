@@ -1410,9 +1410,11 @@ def _parallel_worker(worker_args: dict) -> str | None:
     return report_path
 
 
-# Common video formats (dav = Dahua DVR format)
-VIDEO_EXTENSIONS = ['mp4', 'm4v', 'avi', 'mov', 'mkv', 'wmv', 'flv', 'webm',
-                    'mpeg', 'mpg', 'ts', 'mts', 'm2ts', '3gp', 'asf', 'dav']
+# Supported video containers — the SINGLE SOURCE OF TRUTH for the whole
+# app (main.rs VIDEO_EXTS and FileSelector.vue mirror it; a unit test
+# fails on any divergence — they had already drifted apart once).
+# dav = Dahua DVR, bin = Hikvision raw export.
+VIDEO_EXTENSIONS = ['mp4', 'm4v', 'avi', 'mov', 'mkv', 'wmv', 'flv', 'webm', 'mpeg', 'mpg', 'ts', 'mts', 'm2ts', '3gp', 'asf', 'dav', 'bin']
 
 
 def _videos_in_dir(dir_path: Path) -> list[str]:

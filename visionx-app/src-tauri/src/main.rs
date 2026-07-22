@@ -616,8 +616,11 @@ async fn finalize_match(app: AppHandle, session: String, decisions: String) -> R
 
 /// Video formats accepted by the pipeline (kept in sync with vision.py's
 /// VIDEO_EXTENSIONS; dav = Dahua DVR format).
-const VIDEO_EXTS: [&str; 16] = ["mp4", "m4v", "avi", "mov", "mkv", "wmv",
-    "flv", "webm", "mpeg", "mpg", "ts", "mts", "m2ts", "3gp", "asf", "dav"];
+// Mirrors vision.py VIDEO_EXTENSIONS (the source of truth) — kept in sync
+// by tests/test_consistency.py, which fails the suite on any divergence.
+const VIDEO_EXTS: [&str; 17] = ["mp4", "m4v", "avi", "mov", "mkv", "wmv",
+    "flv", "webm", "mpeg", "mpg", "ts", "mts", "m2ts", "3gp", "asf", "dav",
+    "bin"];
 
 /// List the video files directly inside a folder. Used by the folder picker
 /// and by drag-and-drop of a directory, so the UI always holds individual

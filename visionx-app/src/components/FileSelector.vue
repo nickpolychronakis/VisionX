@@ -14,7 +14,9 @@ const isDragging = ref(false);
 const folderNote = ref("");
 let unlisten: (() => void) | null = null;
 
-const videoExtensions = ['mp4', 'avi', 'mov', 'mkv', 'wmv', 'flv', 'webm', 'm4v', 'mpeg', 'mpg', '3gp', 'ts', 'mts', 'bin', 'dav'];
+// Mirrors vision.py VIDEO_EXTENSIONS (source of truth; sync enforced by
+// tests/test_consistency.py — the lists had silently diverged before).
+const videoExtensions = ['mp4', 'm4v', 'avi', 'mov', 'mkv', 'wmv', 'flv', 'webm', 'mpeg', 'mpg', 'ts', 'mts', 'm2ts', '3gp', 'asf', 'dav', 'bin'];
 
 // Expand any directories among the paths into the video files inside them;
 // keep direct video files as-is. The list always ends up holding individual
@@ -73,7 +75,8 @@ async function selectFiles() {
       filters: [
         {
           name: "Video",
-          extensions: ["mp4", "avi", "mov", "mkv", "wmv", "flv", "webm", "m4v", "mpeg", "mpg", "3gp", "ts", "mts", "bin", "dav"],
+          // Same canonical list as videoExtensions above (one constant).
+          extensions: videoExtensions,
         },
       ],
     });
