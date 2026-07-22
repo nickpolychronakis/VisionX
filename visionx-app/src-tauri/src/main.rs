@@ -65,6 +65,24 @@ struct ProcessConfig {
 
 fn default_true() -> bool { true }
 
+/// Where the runnable Python scripts live. Release builds: the data-dir
+/// copy that setup deployed. DEBUG builds: directly the bundled resources
+/// — build.rs re-syncs them from the repo root at every compile, so dev
+/// always runs current code. This removes the manual "cp scripts to the
+/// data dir" ritual whose one forgotten run shipped stale scripts and made
+/// the live preview silently disappear (field bug, 2026-07-22).
+fn effective_scripts_dir(app: &AppHandle, data_dir: &std::path::Path)
+    -> Result<std::path::PathBuf, String>
+{
+    if cfg!(debug_assertions) {
+        Ok(app.path().resource_dir()
+            .map_err(|e| format!("Failed to get resource dir: {}", e))?
+            .join("scripts"))
+    } else {
+        Ok(setup::scripts_dir_path(data_dir))
+    }
+}
+
 // Global state to track the current process
 struct ProcessState {
     child: Option<CommandChild>,
@@ -173,7 +191,7 @@ async fn process_videos(
     // Paths
     let python_exe = setup::python_exe_path(&data_dir);
     let packages_dir = setup::packages_dir_path(&data_dir);
-    let scripts_dir = setup::scripts_dir_path(&data_dir);
+    let scripts_dir = effective_scripts_dir(&app, &data_dir)?;
     let vision_script = scripts_dir.join("vision.py");
 
     logger.info(&format!("Python: {}", python_exe.display()));
@@ -580,7 +598,7 @@ async fn finalize_match(app: AppHandle, session: String, decisions: String) -> R
     let data_dir = app.path().app_data_dir()
         .map_err(|e| format!("Failed to get data dir: {}", e))?;
     let python_exe = setup::python_exe_path(&data_dir);
-    let scripts_dir = setup::scripts_dir_path(&data_dir);
+    let scripts_dir = effective_scripts_dir(&app, &data_dir)?;
     let packages_dir = setup::packages_dir_path(&data_dir);
     let script = scripts_dir.join("vision.py");
 
@@ -658,7 +676,7 @@ fn run_plate_tool(app: AppHandle, video: String) -> Result<(), String> {
     let data_dir = app.path().app_data_dir()
         .map_err(|e| format!("Failed to get data dir: {}", e))?;
     let python_exe = setup::python_exe_path(&data_dir);
-    let scripts_dir = setup::scripts_dir_path(&data_dir);
+    let scripts_dir = effective_scripts_dir(&app, &data_dir)?;
     let packages_dir = setup::packages_dir_path(&data_dir);
     let plate_script = scripts_dir.join("plate.py");
 
