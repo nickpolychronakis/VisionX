@@ -32,6 +32,7 @@ Usage:
 
 import argparse
 import json
+import math
 import sys
 import time
 from dataclasses import dataclass, field
@@ -110,6 +111,8 @@ K_L = (ord('l'), ord('L'), 955, 923)   # l · λ · Λ
 K_R = (ord('r'), ord('R'), 961, 929)   # r · ρ · Ρ
 K_F = (ord('f'), ord('F'), 966, 934)   # f · φ · Φ
 K_Q = (ord('q'), ord('Q'), 59)         # q — Greek layout maps the q key to ';'
+K_N = (ord('n'), ord('N'), 957, 925)   # n · ν · Ν — "new segment" prompt
+K_B = (ord('b'), ord('B'), 946, 914)   # b · β · Β — auto-scan for best plate view
 
 
 def _seek_step(key: int) -> int:
@@ -178,9 +181,16 @@ class _ConfirmQuit:
             DEBUG(mode, 'quit confirmed (second q)')
             return True
         self._armed_at = now
-        log('  press q again to finish')
+        log('  Πατήστε ξανά q για ολοκλήρωση')
         DEBUG(mode, 'quit armed, awaiting second q')
         return False
+
+    @property
+    def pending(self) -> bool:
+        """True while the first q is armed — the HUD shows the hint so the
+        user watching the VIDEO (not the terminal) knows a second q is
+        expected (field feedback: single q appearing to 'do nothing')."""
+        return time.monotonic() - self._armed_at <= 1.5
 
 
 # ---------------------------------------------------------------------------
@@ -198,6 +208,8 @@ class Sample:
     rect: np.ndarray = None     # canonical rectified BGR crop (filled later)
     aligned: np.ndarray = None  # ECC-aligned version of rect (None if ECC failed)
     ecc_cc: float = 0.0         # ECC correlation vs reference (alignment quality)
+    sat_ratio: float = 0.0      # fraction of clipped (>=250) pixels — burned plate
+    rect_level: np.ndarray = None  # tilt-corrected rendering (quad-levelled)
 
 
 @dataclass
@@ -274,6 +286,18 @@ def open_video(path: str) -> tuple:
         fail(f'cannot open video: {path}')
     total = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
     fps = cap.get(cv2.CAP_PROP_FPS) or 25.0
+    if fps <= 0 or fps != fps:
+        fps = 25.0
+    if total <= 0:
+        # DVR containers (.dav) often report zero frames while decoding
+        # fine — count by grab() (demux-only, fast) before giving up.
+        log('Καταμέτρηση καρέ (αρχείο DVR χωρίς μεταδεδομένα)...')
+        probe = cv2.VideoCapture(path)
+        total = 0
+        while probe.grab():
+            total += 1
+        probe.release()
+        log(f'  {total} καρέ')
     if total <= 0:
         fail(f'could not read video (0 frames detected): {path}')
     return cap, total, fps
@@ -383,7 +407,125 @@ def _seek_bar_strip(w, pos, total):
     return strip
 
 
-def gui_pick_roi(cap, total_frames, fps, start_frame=0):
+def scan_plate_appearances(cap, total_frames, detector, hud_frame=None):
+    """Automatic whole-video plate scan (user request: "why must I hunt for
+    the closest pass manually?"). Probes ~240 evenly-spaced frames with the
+    plate detector on a downscaled copy — small/far plates vanish at the
+    detector's input size, so what survives is exactly the LARGE, readable
+    appearances we want to jump to. Returns [(frame_idx, box, w)] sorted by
+    plate width, largest first."""
+    stride = max(1, total_frames // 120)
+    found = []
+    if hud_frame is not None:
+        dark = (hud_frame * 0.35).astype(np.uint8)
+        _hud(dark, 1, 'SCANNING VIDEO FOR PLATE APPEARANCES...', (0, 255, 255))
+        cv2.imshow(WINDOW, dark)
+        cv2.waitKey(1)
+    log(f'  Σάρωση βίντεο για εμφανίσεις πινακίδας ({total_frames // stride} δείγματα)...')
+    # TILED detection: the detector letterboxes its input to 640px, so on a
+    # full HD/4K frame a 60-100px plate shrinks below detectability (first
+    # version found literally nothing). 800px tiles with 25% overlap keep
+    # plates near their native size.
+    TILE, OVER = 800, 200
+    for idx in range(0, total_frames, stride):
+        frame = seek(cap, idx)
+        if frame is None:
+            continue
+        h, w = frame.shape[:2]
+        per_frame = []
+        for ty in range(0, max(1, h - OVER), TILE - OVER):
+            for tx in range(0, max(1, w - OVER), TILE - OVER):
+                tile = frame[ty:ty + TILE, tx:tx + TILE]
+                if tile.shape[0] < 60 or tile.shape[1] < 60:
+                    continue
+                try:
+                    dets = detector.predict(tile)
+                except Exception:  # noqa: BLE001
+                    continue
+                for d in dets:
+                    if float(d.confidence) < 0.25:
+                        continue
+                    bb = d.bounding_box
+                    box = (int(bb.x1) + tx, int(bb.y1) + ty,
+                           int(bb.x2 - bb.x1), int(bb.y2 - bb.y1))
+                    # Plate geometry gate: without it the widest "find" was
+                    # an 803x704 false positive (a whole car front) that
+                    # hijacked the best-first ranking. Real plates run
+                    # ~1.8-7.5 w/h (GR long plates ≈4.7, square moto ≈2)
+                    # and never approach half the frame width.
+                    aspect = box[2] / max(1, box[3])
+                    if not (1.8 <= aspect <= 7.5) or box[2] > 0.5 * w:
+                        continue
+                    per_frame.append((box, float(d.confidence)))
+        # Overlapping tiles see the same plate twice — keep the widest of
+        # any overlapping pair.
+        per_frame.sort(key=lambda t: -t[0][2])
+        kept = []
+        for box, conf in per_frame:
+            if all(iou(box, kb) < 0.4 for kb, _ in kept):
+                kept.append((box, conf))
+        for box, _conf in kept:
+            found.append((idx, box, box[2]))
+    # Chain appearances into PHYSICAL plates: consecutive-probe boxes that
+    # overlap (or nearly touch) belong to the same vehicle. The b key then
+    # cycles per VEHICLE (each shown at its largest appearance) instead of
+    # through 100+ near-duplicate frames.
+    found.sort(key=lambda t: t[0])
+    clusters = []  # each: {'last': box, 'items': [(idx, box, w)]}
+    for idx, box, bw in found:
+        home = None
+        cx, cy = box[0] + box[2] / 2, box[1] + box[3] / 2
+        for cl in clusters:
+            lb = cl['last']
+            lcx, lcy = lb[0] + lb[2] / 2, lb[1] + lb[3] / 2
+            near = ((lcx - cx) ** 2 + (lcy - cy) ** 2) ** 0.5 < 2.5 * max(box[2], lb[2])
+            if iou(box, lb) > 0.15 or near:
+                home = cl
+                break
+        if home is None:
+            clusters.append({'last': box, 'items': [(idx, box, bw)]})
+        else:
+            home['last'] = box
+            home['items'].append((idx, box, bw))
+    # Burned-in overlays (dashcam logo, timestamps) detect as "plates" but
+    # sit PIXEL-IDENTICAL across the whole video — even a parked car's
+    # plate jitters a little through compression. Field case: the 70mai
+    # watermark ranked #1 and OCR'd as '70100'.
+    def is_static(cl):
+        # Detector boxes around a burned-in logo jitter a few px (the video
+        # behind it changes), so the test is RELATIVE: position/size drift
+        # under ~10% of the width across many appearances. Static clusters
+        # are DERANKED, not dropped — on a fixed camera a parked car is
+        # static too and must stay reachable.
+        if len(cl['items']) < 6:
+            return False
+        xs = [b[0] for _, b, _ in cl['items']]
+        ws = [b[2] for _, b, _ in cl['items']]
+        tol = max(4, 0.1 * (sum(ws) / len(ws)))
+        return (max(xs) - min(xs) <= tol and max(ws) - min(ws) <= tol)
+    moving, static = [], []
+    for cl in clusters:
+        best = max(cl['items'], key=lambda t: t[2])
+        (static if is_static(cl) else moving).append((best, len(cl['items'])))
+    # Single-probe clusters rank BELOW multi-probe ones: a genuinely close
+    # pass shows up in several probes, while borderline logo detections
+    # (conf hovering at the threshold) flicker into ONE probe and — being
+    # huge — hijacked the top spot (field case: 70mai watermark at 416px).
+    moving.sort(key=lambda t: (-(t[1] >= 2), -t[0][2]))
+    static.sort(key=lambda t: -t[0][2])
+    moving = [b for b, _n in moving]
+    static = [b for b, _n in static]
+    if static:
+        log(f'  ({len(static)} στατικές εμφανίσεις — λογότυπα/υπερθέματα ή '
+            f'παρκαρισμένα — μπήκαν στο ΤΕΛΟΣ της λίστας)')
+    found = ([(i, b, w2, False) for i, b, w2 in moving]
+             + [(i, b, w2, True) for i, b, w2 in static])
+    log(f'  Βρέθηκαν {len(found)} εμφανίσεις — b: άλμα στη μεγαλύτερη, '
+        f'ξανά b: επόμενη, ENTER: αποδοχή πλαισίου')
+    return found
+
+
+def gui_pick_roi(cap, total_frames, fps, start_frame=0, detector=None):
     """Selection screen: seek freely AND drag a box around the plate at any
     moment — tracking starts the instant the mouse button is released, with
     no confirmation key (the video starts here directly, per user feedback:
@@ -391,8 +533,9 @@ def gui_pick_roi(cap, total_frames, fps, start_frame=0):
 
     Returns (frame_idx, (x, y, w, h)) or (None, None) on abort.
     """
-    log('\n[Select] drag a box around the plate (any time) · SPACE play/pause · '
-        'a/d ±1 frame · j/l ±25 · seek bar at the bottom · q abort')
+    log('\n[Select] drag a box around the plate (any time) · b = ΑΥΤΟΜΑΤΗ '
+        'εύρεση καλύτερης εμφάνισης · SPACE play/pause · a/d ±1 · j/l ±25 · '
+        'seek bar κάτω · q abort')
 
     cv2.namedWindow(WINDOW, cv2.WINDOW_NORMAL)
     quit_guard = _ConfirmQuit()
@@ -411,6 +554,12 @@ def gui_pick_roi(cap, total_frames, fps, start_frame=0):
 
     drawer = _BoxDrawer(seek_strip=SEEK_BAR_H, frame_h=H, on_seek=on_seek)
     cv2.setMouseCallback(WINDOW, drawer.on_mouse)
+
+    # Auto-scan state (b key): lazily computed plate appearances, largest
+    # first, with the current suggestion drawn for one-key acceptance.
+    suggestions = None
+    sug_i = -1
+    sug_box = None
 
     while True:
         if drawer.start:
@@ -435,6 +584,16 @@ def gui_pick_roi(cap, total_frames, fps, start_frame=0):
         ts = state['pos'] / fps
         _hud(disp, 1, f'frame {state["pos"]}  t={int(ts//60):02d}:{ts%60:05.2f}  '
              f'{"PLAY" if playing else "PAUSE"}  drag box = select plate')
+        if sug_box is not None:
+            sx, sy, sw2, sh2 = sug_box
+            cv2.rectangle(disp, (sx, sy), (sx + sw2, sy + sh2),
+                          (255, 200, 0), _box_thickness(disp))
+            st_lbl = ' [STATIC: logo/parked?]' if state.get('sug_static') else ''
+            _hud(disp, 2, f'AUTO {sug_i + 1}/{len(suggestions)} '
+                 f'w={sug_box[2]}px{st_lbl} - ENTER accept | b next | drag adjust',
+                 (255, 200, 0))
+        if quit_guard.pending:
+            _hud(disp, 2, 'PRESS q AGAIN TO QUIT', (0, 0, 255))
         # Bar appended BELOW the frame — the full image stays drag-selectable.
         cv2.imshow(WINDOW, np.vstack([disp, _seek_bar_strip(W, state['pos'], total_frames)]))
 
@@ -457,8 +616,30 @@ def gui_pick_roi(cap, total_frames, fps, start_frame=0):
             f = seek(cap, state['pos'])
             if f is not None:
                 frame = f
-        elif key in K_ENTER:  # ENTER is gone on purpose — teach the drag gesture
-            log('  (tip: just drag a box around the plate with the mouse)')
+        elif key in K_B and detector is not None:
+            # Auto-scan (user request: the tool should FIND the best view
+            # itself). First press scans the whole video; each press jumps
+            # to the next-largest plate appearance with a ready-made box.
+            if suggestions is None:
+                suggestions = scan_plate_appearances(cap, total_frames,
+                                                     detector, hud_frame=frame)
+                if not suggestions:
+                    log('  Καμία εμφάνιση πινακίδας στη σάρωση — επίλεξε χειροκίνητα')
+            if suggestions:
+                sug_i = (sug_i + 1) % len(suggestions)
+                idx, sbox, _w, sug_static = suggestions[sug_i]
+                playing = False
+                state['pos'] = idx
+                f = seek(cap, idx)
+                if f is not None:
+                    frame = f
+                sug_box = sbox
+                state['sug_static'] = sug_static
+        elif key in K_ENTER:
+            if sug_box is not None:
+                DEBUG('select', f'ROI auto-accept={sug_box} @ frame={state["pos"]}')
+                return state['pos'], sug_box
+            log('  (tip: drag a box with the mouse, or press b for auto-scan)')
 
 
 # ---------------------------------------------------------------------------
@@ -474,6 +655,42 @@ def make_tracker(kind: str):
     return cv2.TrackerCSRT_create()
 
 
+def bright_plate_quad(crop: np.ndarray):
+    """Saturated-plate geometry: on burned night footage a HUMAN instantly
+    sees the white parallelogram even though OCR/neural detectors see no
+    character texture (user: "can't it spot the white rectangle like a
+    person would?"). Threshold the near-clipped range and accept the largest
+    solid, plate-shaped rotated rectangle. Returns 4 corner points (float32
+    4x2, crop coords) or None. Headlight flares fail the aspect (round) and
+    solidity (irregular glow) gates."""
+    if crop.size == 0:
+        return None
+    g = cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY)
+    mask = (g >= 235).astype(np.uint8) * 255
+    mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, np.ones((3, 3), np.uint8))
+    contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL,
+                                   cv2.CHAIN_APPROX_SIMPLE)
+    ch, cw = g.shape
+    best, best_area = None, 0.0
+    for c in contours:
+        area = cv2.contourArea(c)
+        if area < 0.02 * cw * ch:
+            continue
+        (cx, cy), (rw, rh), ang = cv2.minAreaRect(c)
+        if rw < rh:
+            rw, rh = rh, rw
+        if rh <= 1:
+            continue
+        aspect = rw / rh
+        solidity = area / max(1.0, rw * rh)
+        if not (1.8 <= aspect <= 7.5) or solidity < 0.75:
+            continue
+        if area > best_area:
+            best_area = area
+            best = cv2.boxPoints(((cx, cy), (rw, rh), ang))
+    return best
+
+
 def refine_with_detector(detector, frame, box, pad_ratio=0.6):
     """Run the plate detector on a padded crop around `box`.
 
@@ -485,6 +702,49 @@ def refine_with_detector(detector, frame, box, pad_ratio=0.6):
     if crop.size == 0:
         return None, 0.0
     dets = detector.predict(crop)
+    if not dets:
+        # Detection retry on a contrast-enhanced rendering (field case: night
+        # IR footage where the plate is a low-contrast/overexposed blob — the
+        # detector sees no character texture on the raw pixels but often does
+        # after CLAHE + mild gamma). CONFIRM-ONLY: a boosted detection may
+        # validate the box the tracker already has (IoU gate below) but never
+        # relocate it — contrast artifacts produce plausible false plates,
+        # and an early version of this retry derailed tracking on the
+        # ground-truth clip by re-anchoring onto them. Crops still come from
+        # the ORIGINAL frame either way.
+        try:
+            lab = cv2.cvtColor(crop, cv2.COLOR_BGR2LAB)
+            clahe = cv2.createCLAHE(clipLimit=3.0, tileGridSize=(8, 8))
+            lab[..., 0] = clahe.apply(lab[..., 0])
+            boosted = cv2.cvtColor(lab, cv2.COLOR_LAB2BGR)
+            # Mild highlight compression pulls near-clipped plates back into
+            # a range where edges reappear.
+            lut = np.array([int(255 * (i / 255.0) ** 1.6)
+                            for i in range(256)], np.uint8)
+            for d in detector.predict(cv2.LUT(boosted, lut)):
+                bb = d.bounding_box
+                cand = (int(bb.x1) + ox, int(bb.y1) + oy,
+                        int(bb.x2 - bb.x1), int(bb.y2 - bb.y1))
+                if iou(cand, box) >= 0.25:
+                    # Confirm the CURRENT box with the boosted confidence —
+                    # geometry stays the tracker's.
+                    return box, float(d.confidence)
+        except Exception:  # noqa: BLE001
+            pass
+        # Last resort — SATURATED plate: neural detection needs character
+        # texture, but a burned plate is still an unmistakable white
+        # parallelogram. Geometric confirm (aspect+solidity gates), same
+        # confirm-only rule: validates the tracker's box, never moves it.
+        try:
+            quad = bright_plate_quad(crop)
+            if quad is not None:
+                qx1, qy1 = quad[:, 0].min() + ox, quad[:, 1].min() + oy
+                qx2, qy2 = quad[:, 0].max() + ox, quad[:, 1].max() + oy
+                cand = (int(qx1), int(qy1), int(qx2 - qx1), int(qy2 - qy1))
+                if iou(cand, box) >= 0.25:
+                    return box, DET_ACCEPT  # minimal confirming confidence
+        except Exception:  # noqa: BLE001
+            pass
     if not dets:
         return None, 0.0
     # Rank by overlap with the current track, then by center distance — when
@@ -502,6 +762,47 @@ def refine_with_detector(detector, frame, box, pad_ratio=0.6):
     return best, best_conf
 
 
+def ask_more_segments(cap, pos, total_frames):
+    """End-of-segment prompt: the same vehicle often appears again later in
+    the video (arrives at the start, leaves at the end). [n] loops back to
+    the seek/select phase for another segment — the frames of ALL segments
+    then vote together in one candidate list (more frames = measurably
+    better odds of the true plate ranking high). ENTER/q proceeds to the
+    analysis. GUI-only."""
+    frame = seek(cap, max(0, min(pos, total_frames - 1)))
+    if frame is None:
+        return False
+    disp = frame.copy()
+    _hud(disp, 1, 'Segment finished - is the SAME vehicle visible '
+                  'elsewhere in the video?')
+    _hud(disp, 2, '[n] add another segment   [ENTER or q] finish & analyse',
+         (0, 255, 0))
+    cv2.imshow(WINDOW, disp)
+    log('\n[Τμήμα] n = νέο τμήμα (ίδιο όχημα σε άλλο σημείο) · '
+        'ENTER/q = ολοκλήρωση & ανάλυση')
+    while True:
+        key = _wait_key(50, 'segment-prompt')
+        if key in K_N:
+            return True
+        if key in K_ENTER or key in K_Q or key == K_ESC:
+            return False
+
+
+def show_busy(frame, step, text):
+    """Paint a processing banner into the tool window between the heavy
+    synchronous stages (ECC, fusion, OCR, report). Without it the window
+    freezes on the last frame after q-q and the user thinks the tool hung
+    (field feedback). cv2.waitKey(1) flushes the paint before the stage
+    starts. No-op in --no-gui runs (frame is None)."""
+    if frame is None:
+        return
+    dark = (frame * 0.35).astype(np.uint8)
+    _hud(dark, 1, f'PROCESSING {step}/4 - {text}', (0, 255, 255))
+    _hud(dark, 2, 'please wait, the report will open when done', (255, 255, 255))
+    cv2.imshow(WINDOW, dark)
+    cv2.waitKey(1)
+
+
 def collect_samples(cap, detector, start_frame, roi, args, fps=25.0):
     """Track the plate from start_frame forward, collecting one Sample per frame.
 
@@ -515,6 +816,9 @@ def collect_samples(cap, detector, start_frame, roi, args, fps=25.0):
     if frame is None:
         fail(f'cannot read start frame {start_frame}')
     H, W = frame.shape[:2]
+    # Live plate-outline state (WPODNet quad, refreshed at 2Hz on
+    # detector-confirmed frames; translated with the box in between).
+    live_quad = {'ts': -10.0, 'pts': None, 'box': (0, 0, 0, 0)}
 
     samples: list[Sample] = []
     tracker = None  # created by reseed() below
@@ -556,7 +860,8 @@ def collect_samples(cap, detector, start_frame, roi, args, fps=25.0):
         cw, ch = canonical_size(w, h)
         gray = cv2.cvtColor(cv2.resize(crop, (cw, ch), interpolation=cv2.INTER_CUBIC),
                             cv2.COLOR_BGR2GRAY)
-        samples.append(Sample(frame_idx, cb, crop, laplacian_sharpness(gray), conf))
+        samples.append(Sample(frame_idx, cb, crop, laplacian_sharpness(gray), conf,
+                              sat_ratio=float((gray >= 250).mean())))
         return True
 
     def reseed(fr, b):
@@ -659,6 +964,25 @@ def collect_samples(cap, detector, start_frame, roi, args, fps=25.0):
             box = tbox
             lost_streak = 0
             record(frame, box, det_conf)
+            # Sustained-drift guard (user request: "stop and ASK me — the
+            # orange tracker-only phase is unreliable"). CSRT can slide off
+            # the plate while still "succeeding", so hard loss never fires.
+            # If the detector confirmed this track before (≥5 times) and has
+            # now been silent for ~2.5s of video, pause into fix-mode so the
+            # human verifies the box instead of collecting drifted crops.
+            # Footage where the detector NEVER confirms (saturated night
+            # plates) is exempt — there is nothing to "re-confirm" and the
+            # tool would nag forever.
+            if (gui and det_conf == 0 and det_miss >= 60
+                    and sum(1 for s in samples if s.det_conf > 0) >= 5):
+                log(f'  Ο ανιχνευτής έχει να επιβεβαιώσει {det_miss} καρέ — '
+                    f'έλεγξε αν το κουτί είναι ακόμα στην πινακίδα')
+                DEBUG('track', f'det-miss pause @ frame={frame_idx}')
+                det_miss = 0  # one prompt per drift episode, not per frame
+                if correct(frame) == 'stop':
+                    stop_reason = 'finished from fix-mode after det-miss pause'
+                    break
+                continue
         else:
             lost_streak += 1
             if lost_streak > args.lost_tolerance:
@@ -685,6 +1009,35 @@ def collect_samples(cap, detector, start_frame, roi, args, fps=25.0):
             # only if it stays orange while sliding off the plate).
             color = (0, 255, 0) if det_conf > 0 else (0, 200, 255)
             cv2.rectangle(disp, (x, y), (x + w, y + h), color, _box_thickness(disp))
+            # True plate outline (user request): WPODNet quad, refreshed at
+            # most twice a second on detector-confirmed frames — the box is
+            # the tracker's container, the quad is the plate itself.
+            if det_conf > 0 and not getattr(args, 'no_rectify', False):
+                now_q = time.monotonic()
+                if now_q - live_quad['ts'] >= 0.5:
+                    live_quad['ts'] = now_q
+                    crop_q = frame[y:y + h, x:x + w]
+                    if crop_q.size:
+                        q, _ = estimate_quad(crop_q, args)
+                        if q is None:
+                            # Saturated plates: WPOD sees no texture, but the
+                            # white parallelogram's own corners outline the
+                            # plate exactly — even at an angle.
+                            bq = bright_plate_quad(crop_q)
+                            q = ([(float(px), float(py)) for px, py in bq]
+                                 if bq is not None else None)
+                        live_quad['pts'] = ([(int(qx + x), int(qy + y))
+                                             for qx, qy in q] if q else None)
+                        live_quad['box'] = box
+            if live_quad.get('pts'):
+                # Translate the last quad by the box's motion since it was
+                # computed — follows the plate between the 2Hz refreshes.
+                bx0, by0 = live_quad['box'][:2]
+                dx, dy = x - bx0, y - by0
+                pts = np.array([(px + dx, py + dy)
+                                for px, py in live_quad['pts']])
+                cv2.polylines(disp, [pts], True, (80, 255, 80),
+                              max(1, _box_thickness(disp) - 1))
             _hud(disp, 1, f'frame {frame_idx}  samples {len(samples)}  '
                  f'{"FAST" if fast else f"{speed_steps[speed_i]:g}x"}')
             # Persistent detector status (user feedback: an indicator that only
@@ -695,6 +1048,8 @@ def collect_samples(cap, detector, start_frame, roi, args, fps=25.0):
                 _hud(disp, 2, f'DET OK {det_conf:.2f}', (0, 255, 0))
             else:
                 _hud(disp, 2, f'DET MISS {det_miss}', (0, 200, 255))
+            if quit_guard.pending:
+                _hud(disp, 3, 'PRESS q AGAIN TO FINISH', (0, 0, 255))
             cv2.imshow(WINDOW, disp)
             # Sleep away whatever is left of the frame budget so the preview
             # runs at the chosen fraction of real time instead of CPU speed.
@@ -825,6 +1180,10 @@ def rectify_and_align(samples: list[Sample], args) -> tuple:
     ref = max(samples, key=lambda s: s.sharpness * (0.5 + s.det_conf / 2))
     cw, ch = canonical_size(ref.box[2], ref.box[3])
 
+    # Quad-based tilt correction produces an ADDITIONAL rendering per tilted
+    # frame (s.rect_level) — it votes alongside the plain resize instead of
+    # replacing it, so imperfect quads can never make results worse.
+    rectify_by_quads(samples, cw, ch, args)
     for s in samples:
         s.rect = cv2.resize(s.crop, (cw, ch), interpolation=cv2.INTER_CUBIC)
 
@@ -863,6 +1222,206 @@ def rectify_and_align(samples: list[Sample], args) -> tuple:
 
 
 # ---------------------------------------------------------------------------
+# Phase 3.5 — quad rectification (WPODNet corner regression)
+# ---------------------------------------------------------------------------
+
+# Lazy singleton: the WPODNet predictor loads once (~1s) on first use.
+_WPOD = {'predictor': None, 'failed': False}
+
+RECTIFY_MIN_CONF = 0.60   # quad confidence gate
+RECTIFY_MIN_TILT = 3.0    # degrees. History: started at 6° (research: no
+                          # gain on frontal plates + quad estimator noise is
+                          # ±2-3°). Lowered to 3° on user field judgment: on
+                          # MARGINAL real plates a few degrees can flip Z<->I,
+                          # and since the levelled rendering VOTES (never
+                          # replaces), a phantom-tilt correction can only lose
+                          # the vote — the gate is purely a compute filter.
+                          # Measured on ground truth: no quality change in
+                          # either direction; cost negligible.
+
+
+def _wpod_predictor(args):
+    """Load WPODNet from the app models dir / script dir / download. Returns
+    the predictor or None (optional capability — plate reading must keep
+    working without it)."""
+    if _WPOD['failed'] or _WPOD['predictor'] is not None:
+        return _WPOD['predictor']
+    try:
+        from wpodnet import Predictor, load_wpodnet_from_checkpoint
+        candidates = [
+            Path.home() / 'Library/Application Support/com.visionx.app/models/wpodnet.pth',
+            Path(__file__).parent / 'models' / 'wpodnet.pth',
+        ]
+        ckpt = next((p for p in candidates if p.exists()), None)
+        if ckpt is None:
+            import urllib.request
+            ckpt = candidates[0]
+            ckpt.parent.mkdir(parents=True, exist_ok=True)
+            log('  Λήψη μοντέλου ισιώματος (wpodnet.pth, ~6MB)...')
+            urllib.request.urlretrieve(
+                'https://github.com/Pandede/WPODNet-Pytorch/releases/download/1.0.0/wpodnet.pth',
+                str(ckpt))
+        _WPOD['predictor'] = Predictor(load_wpodnet_from_checkpoint(str(ckpt)))
+    except Exception as e:  # noqa: BLE001 — optional capability
+        log(f'  (ίσιωμα μη διαθέσιμο: {e} — συνεχίζω χωρίς)')
+        _WPOD['failed'] = True
+    return _WPOD['predictor']
+
+
+def _quad_tilt_deg(quad) -> float:
+    """Max deviation from horizontal/vertical of the quad's top & left edges."""
+    (x0, y0), (x1, y1), _, (x3, y3) = quad
+    top = abs(math.degrees(math.atan2(y1 - y0, max(1e-6, x1 - x0))))
+    left = abs(90.0 - abs(math.degrees(math.atan2(y3 - y0, x3 - x0))))
+    return max(top, left)
+
+
+def estimate_quad(crop: np.ndarray, args):
+    """Plate quad inside a (tight) crop via WPODNet corner regression.
+    Returns (quad 4x(x,y) in crop coords, confidence) or (None, 0.0).
+    The crop gets a 25% replicated border first — the net expects some
+    context around the plate, which tight tracker boxes lack."""
+    predictor = _wpod_predictor(args)
+    if predictor is None:
+        return None, 0.0
+    try:
+        from PIL import Image
+        h, w = crop.shape[:2]
+        pad = max(8, int(0.25 * max(w, h)))
+        padded = cv2.copyMakeBorder(crop, pad, pad, pad, pad,
+                                    cv2.BORDER_REPLICATE)
+        pred = predictor.predict(
+            Image.fromarray(cv2.cvtColor(padded, cv2.COLOR_BGR2RGB)))
+        if pred.confidence < RECTIFY_MIN_CONF:
+            return None, float(pred.confidence)
+        quad = [(float(x) - pad, float(y) - pad) for x, y in pred.bounds]
+        return quad, float(pred.confidence)
+    except Exception:  # noqa: BLE001
+        return None, 0.0
+
+
+def level_by_quad(crop: np.ndarray, quad):
+    """Orientation-only levelling: warp the WHOLE crop so the plate quad
+    becomes horizontal. The quad supplies ORIENTATION only — never crop
+    bounds: WPOD's quad can under-cover the plate (verified: it clipped 'KH'
+    off a 'KHE4718' crop and the OCR then misread). Expanded canvas, so
+    pixels are never cut. Returns the levelled crop or None. Shared by the
+    interactive tool and the auto-ALPR pass (plate_core)."""
+    try:
+        q = np.float32(quad)
+        wt = (np.linalg.norm(q[1] - q[0]) + np.linalg.norm(q[2] - q[3])) / 2
+        ht = (np.linalg.norm(q[3] - q[0]) + np.linalg.norm(q[2] - q[1])) / 2
+        dstq = np.float32([(0, 0), (wt, 0), (wt, ht), (0, ht)])
+        M = cv2.getPerspectiveTransform(q, dstq)
+        hh, ww = crop.shape[:2]
+        corners = cv2.perspectiveTransform(
+            np.float32([[(0, 0), (ww, 0), (ww, hh), (0, hh)]]), M)[0]
+        mn = corners.min(axis=0)
+        mx = corners.max(axis=0)
+        T = np.array([[1, 0, -mn[0]], [0, 1, -mn[1]], [0, 0, 1]],
+                     dtype=np.float64)
+        out_w = max(8, int(math.ceil(mx[0] - mn[0])))
+        out_h = max(8, int(math.ceil(mx[1] - mn[1])))
+        return cv2.warpPerspective(crop, T @ M.astype(np.float64),
+                                   (out_w, out_h), flags=cv2.INTER_CUBIC,
+                                   borderMode=cv2.BORDER_REPLICATE)
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def rectify_by_quads(samples: list[Sample], cw: int, ch: int, args) -> int:
+    """Warp each crop's estimated plate quad to the fronto-parallel canonical
+    rectangle (pure geometric transform of real pixels — evidentiarily
+    transparent). Applied ONLY when the tilt is significant (see gates
+    above); near-frontal crops keep the plain resize. Returns count."""
+    if getattr(args, 'no_rectify', False):
+        return 0
+    n_rect = 0
+    tilts = []
+    # Detector-confirmed samples only (same idea as ocr_pool, but computed
+    # directly: ocr_pool filters on s.rect which is not set yet at this
+    # point in the pipeline — that filter silently skipped everything).
+    cand = [s for s in samples if s.det_conf >= 0.2]
+    if len(cand) < 5:
+        cand = samples
+    for s in cand:
+        quad, _conf = estimate_quad(s.crop, args)
+        if quad is None:
+            continue
+        tilt = _quad_tilt_deg(quad)
+        if tilt < RECTIFY_MIN_TILT:
+            continue
+        levelled = level_by_quad(s.crop, quad)
+        if levelled is None:
+            continue
+        s.rect_level = cv2.resize(levelled, (cw, ch),
+                                  interpolation=cv2.INTER_CUBIC)
+        n_rect += 1
+        tilts.append(tilt)
+    if n_rect:
+        log(f'  Ίσιωμα: {n_rect} καρέ απέκτησαν οριζόντια απόδοση '
+            f'(μέση κλίση {sum(tilts) / len(tilts):.1f}°) — ψηφίζουν ΚΑΙ οι '
+            f'δύο εκδοχές, η ψηφοφορία κρίνει')
+    return n_rect
+
+
+# ---------------------------------------------------------------------------
+# Phase 3.6 — regression super-resolution rendering (FSRCNN, non-generative)
+# ---------------------------------------------------------------------------
+
+_SRNET = {'sr': None, 'failed': False}
+
+# SR only helps where resolution is the bottleneck; on big crops it wastes
+# OCR votes on a near-duplicate rendering.
+SR_MAX_WIDTH = 110
+
+
+def _sr_net():
+    """FSRCNN x3 through OpenCV dnn_superres (ships in our contrib build).
+    MSE-trained pure regression: sharper learned interpolation of the real
+    pixels — architecturally incapable of the character fabrication that
+    GAN/diffusion SR exhibits (see research memo). Weights ~40KB, ~8ms/crop
+    on CPU. Optional capability: any failure disables it silently."""
+    if _SRNET['failed'] or _SRNET['sr'] is not None:
+        return _SRNET['sr']
+    try:
+        from cv2 import dnn_superres
+        candidates = [
+            Path.home() / 'Library/Application Support/com.visionx.app/models/FSRCNN_x3.pb',
+            Path(__file__).parent / 'models' / 'FSRCNN_x3.pb',
+        ]
+        path = next((p for p in candidates if p.exists()), None)
+        if path is None:
+            import urllib.request
+            path = candidates[0]
+            path.parent.mkdir(parents=True, exist_ok=True)
+            log('  Λήψη μοντέλου υπερ-ανάλυσης (FSRCNN_x3.pb, ~40KB)...')
+            urllib.request.urlretrieve(
+                'https://github.com/Saafke/FSRCNN_Tensorflow/raw/master/models/FSRCNN_x3.pb',
+                str(path))
+        sr = dnn_superres.DnnSuperResImpl_create()
+        sr.readModel(str(path))
+        sr.setModel('fsrcnn', 3)
+        _SRNET['sr'] = sr
+    except Exception as e:  # noqa: BLE001
+        log(f'  (υπερ-ανάλυση μη διαθέσιμη: {e} — συνεχίζω χωρίς)')
+        _SRNET['failed'] = True
+    return _SRNET['sr']
+
+
+def sr_rendering(crop: np.ndarray):
+    """3x regression upscale of the RAW crop (before any canonical resize,
+    so the network sees the true pixels). Returns the rendering or None."""
+    sr = _sr_net()
+    if sr is None or crop.size == 0:
+        return None
+    try:
+        return sr.upsample(crop)
+    except Exception:  # noqa: BLE001
+        return None
+
+
+# ---------------------------------------------------------------------------
 # Phase 4 — sharpness-weighted fusion
 # ---------------------------------------------------------------------------
 
@@ -894,10 +1453,31 @@ def fuse(samples: list[Sample], top_k: int) -> tuple:
         return None, 0
     weights = np.array([s.sharpness ** 2 for s in chosen], dtype=np.float64)
     weights /= weights.sum()
+    # Saturation-masked accumulation (user request, forensic rationale): a
+    # clipped pixel (>=250 gray) carries no scene information, so each pixel
+    # position averages ONLY the frames where it isn't burned. When the
+    # blown-out region moves across frames (car passes through the light
+    # beam), the full plate can assemble itself from the valid parts — pure
+    # arithmetic on real pixels, no synthesis. Positions clipped in EVERY
+    # frame fall back to the plain weighted mean (stay white).
     acc = np.zeros(chosen[0].aligned.shape, dtype=np.float64)
+    plain = np.zeros(chosen[0].aligned.shape, dtype=np.float64)
+    wacc = np.zeros(chosen[0].aligned.shape, dtype=np.float64)
     for s, w in zip(chosen, weights):
-        acc += s.aligned.astype(np.float64) * w
-    fused = np.clip(acc, 0, 255).astype(np.uint8)
+        img = s.aligned.astype(np.float64)
+        valid = (cv2.cvtColor(s.aligned, cv2.COLOR_BGR2GRAY) < 250
+                 ).astype(np.float64)[..., None]
+        acc += img * w * valid
+        wacc += w * valid
+        plain += img * w
+    fused = np.where(wacc > 1e-9, acc / np.maximum(wacc, 1e-9), plain)
+    fused = np.clip(fused, 0, 255).astype(np.uint8)
+    coverage = float((wacc[..., 0] > 1e-9).mean())
+    if coverage < 0.995:
+        log(f'  Fusion με μάσκα κορεσμού: {coverage:.0%} των pixel είχαν '
+            f'τουλάχιστον ένα μη-κορεσμένο καρέ'
+            + (' — οι λευκές περιοχές είναι καμένες σε ΟΛΑ τα καρέ'
+               if coverage < 0.9 else ''))
     # Mild unsharp mask: fusion slightly softens edges (residual sub-pixel
     # error); 0.5 amount restores stroke contrast without ringing. This is
     # light enhancement on REAL averaged pixels — no generative model.
@@ -1008,7 +1588,10 @@ def ocr_pool(samples, max_frames):
     det_pool = [s for s in pool if s.det_conf >= 0.2]
     if len(det_pool) >= 5:
         pool = det_pool
-    pool.sort(key=lambda s: s.sharpness, reverse=True)
+    # (1 - sat_ratio): a mostly-burned crop has nothing for OCR to read, so
+    # partially/un-saturated frames outrank it. For normal footage
+    # (sat_ratio ~0) the ordering is unchanged.
+    pool.sort(key=lambda s: s.sharpness * (1.0 - s.sat_ratio), reverse=True)
     return pool[:max_frames] if max_frames else pool
 
 
@@ -1024,6 +1607,24 @@ def ocr_and_vote(recognizers, samples, fused_img, args, fused_n=0):
 
     base = [(s.rect, s.sharpness * (0.5 + s.det_conf / 2), f'frame {s.frame_idx}')
             for s in chosen]
+    # Tilt-corrected renderings vote alongside the originals (same weight):
+    # on genuinely oblique plates they read far better (+14-17pp in the
+    # literature), on mild tilt the originals win — per-position voting
+    # arbitrates instead of us guessing per video.
+    base += [(s.rect_level, s.sharpness * (0.5 + s.det_conf / 2),
+              f'frame {s.frame_idx} (level)')
+             for s in chosen if s.rect_level is not None]
+    # Small plates additionally vote through an FSRCNN x3 regression-SR
+    # rendering of the RAW crop (resolution is their bottleneck; the learned
+    # upscale reads measurably better than cubic in the literature). Same
+    # rule as tilt-levelling: an extra VOTE, never a replacement.
+    if not getattr(args, 'no_sr', False):
+        for s in chosen:
+            if s.crop.shape[1] <= SR_MAX_WIDTH:
+                up = sr_rendering(s.crop)
+                if up is not None:
+                    base.append((up, s.sharpness * (0.5 + s.det_conf / 2),
+                                 f'frame {s.frame_idx} (sr)'))
     if fused_img is not None:
         # The fused image is our single best evidence (multi-frame denoised);
         # weight it like `fused_boost` average frames so it can outvote a few
@@ -1195,9 +1796,52 @@ def beam_candidates(dists: list, top_n: int):
 # Phase 6 — output
 # ---------------------------------------------------------------------------
 
+def assess_readability(candidates, reads, samples=()):
+    """Verdict on whether the footage carried readable plate text AT ALL.
+
+    Field case that forced this: a night clip with the retroreflective plate
+    fully saturated (pure white) — every OCR read returned empty text, yet
+    the vote still ranked stray-position noise ('?????3'), and the Greek
+    projection dressed that noise up as plausible-looking plates. An
+    investigator must never mistake fabricated structure for a reading, so
+    the verdict travels with every output (terminal, JSON, HTML report).
+
+    Returns (level, reason): level ∈ 'ok' | 'low' | 'none'.
+    """
+    text_reads = sum(1 for r in reads if r.get('text'))
+    if text_reads == 0:
+        # Saturation forensics: distinguish "burned everywhere" (nothing to
+        # do in THIS footage) from "some partially-burned frames exist"
+        # (worth pointing the user at them / at other segments).
+        sats = [s.sat_ratio for s in samples] if samples else []
+        if sats and min(sats) >= 0.5:
+            reason = (f'Η πινακίδα είναι κορεσμένη (καμένη από το φως) σε '
+                      f'ΟΛΑ τα καρέ — μέσος κορεσμός {sum(sats)/len(sats):.0%}. '
+                      f'Σε αυτό το υλικό δεν υπάρχει ανακτήσιμη πληροφορία· '
+                      f'δοκιμάστε σημείο όπου η πινακίδα είναι εκτός δέσμης '
+                      f'φωτός (π.χ. σε στροφή) ή άλλη κάμερα')
+        elif sats and any(v < 0.5 for v in sats):
+            n_ok = sum(1 for v in sats if v < 0.5)
+            reason = (f'Καμία ανάγνωση OCR δεν επέστρεψε χαρακτήρες, αν και '
+                      f'{n_ok} καρέ έχουν μερικό μόνο κορεσμό — πιθανόν πολύ '
+                      f'μικρή/θολή πινακίδα· δείτε το φύλλο καρέ (ένδειξη SAT)')
+        else:
+            reason = ('Καμία ανάγνωση OCR δεν επέστρεψε χαρακτήρες — η '
+                      'πινακίδα είναι κορεσμένη/υπερεκτεθειμένη, πολύ μικρή '
+                      'ή εκτός εστίασης σε όλα τα καρέ')
+        return 'none', reason
+    top = candidates[0] if candidates else None
+    known = len(top.plate.replace('?', '')) if top else 0
+    if top is None or known < 3 or top.score < 0.45 or text_reads < 3:
+        return 'low', (f'Ελάχιστες αξιοποιήσιμες αναγνώσεις ({text_reads}) '
+                       f'ή πολύ αβέβαιη κορυφαία υποψήφια — χρησιμοποιήστε '
+                       f'τις λίστες μόνο ως αχνή ένδειξη')
+    return 'ok', ''
+
+
 def save_outputs(video_path, out_dir, samples, ref, fused_img, candidates, reads,
                  region_votes, roi, start_frame, fps, args, fused_n=0,
-                 gr_candidates=()):
+                 gr_candidates=(), readability=('ok', '')):
     out = Path(out_dir)
     out.mkdir(parents=True, exist_ok=True)
 
@@ -1233,7 +1877,8 @@ def save_outputs(video_path, out_dir, samples, ref, fused_img, candidates, reads
             r, c = divmod(i, cols)
             y0 = r * (ch + label_h)
             sheet[y0:y0 + ch, c * cw:c * cw + cw] = s.rect
-            cv2.putText(sheet, f'f{s.frame_idx} sh={s.sharpness:.0f} cc={s.ecc_cc:.2f}',
+            sat_lbl = f' SAT{s.sat_ratio:.0%}' if s.sat_ratio >= 0.2 else ''
+            cv2.putText(sheet, f'f{s.frame_idx} sh={s.sharpness:.0f} cc={s.ecc_cc:.2f}{sat_lbl}',
                         (c * cw + 4, y0 + ch + 15),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.45, (0, 255, 255), 1, cv2.LINE_AA)
             read = ocr_by_frame.get(s.frame_idx)
@@ -1270,8 +1915,13 @@ def save_outputs(video_path, out_dir, samples, ref, fused_img, candidates, reads
             for c in gr_candidates
         ],
         'individual_reads': reads,
+        'readability': readability[0],
+        'readability_note': readability[1],
         'note': 'Candidate list for investigative DB search — not evidentiary. '
-                'Scores are relative rankings, not calibrated probabilities.',
+                'Scores are relative rankings, not calibrated probabilities.'
+                + (' ΠΡΟΣΟΧΗ: readability=none — οι λίστες είναι στατιστικός '
+                   'θόρυβος, ΜΗΝ χρησιμοποιηθούν για αναζήτηση.'
+                   if readability[0] == 'none' else ''),
     }
     json_path = out / 'candidates.json'
     # utf-8 + ensure_ascii=False: same Windows cp1252 pitfall found in
@@ -1336,12 +1986,22 @@ def save_outputs(video_path, out_dir, samples, ref, fused_img, candidates, reads
 
 
 def print_results(candidates, gr_candidates, reads, region_votes, n_samples,
-                  aligned, fused_n):
+                  aligned, fused_n, readability=('ok', '')):
     """Print the summary AND return it as lines, so main() can also save it
     as summary.txt in the output folder (user request: the report must live
     with the rest of the artifacts, in copy-pasteable text form too)."""
-    lines = [f'Tracked {n_samples} frames, ECC-aligned {aligned}, '
-             f'fusion {f"of {fused_n} frames" if fused_n else "skipped (too few well-aligned frames)"}']
+    lines = []
+    if readability[0] == 'none':
+        lines += ['!' * 62,
+                  '!!  ΜΗ ΑΝΑΓΝΩΣΙΜΗ ΠΙΝΑΚΙΔΑ',
+                  f'!!  {readability[1]}.',
+                  '!!  Οι παρακάτω λίστες είναι ΣΤΑΤΙΣΤΙΚΟΣ ΘΟΡΥΒΟΣ — μην',
+                  '!!  χρησιμοποιηθούν για αναζήτηση σε βάση δεδομένων.',
+                  '!' * 62, '']
+    elif readability[0] == 'low':
+        lines += [f'ΠΡΟΣΟΧΗ — χαμηλή αξιοπιστία: {readability[1]}.', '']
+    lines += [f'Tracked {n_samples} frames, ECC-aligned {aligned}, '
+              f'fusion {f"of {fused_n} frames" if fused_n else "skipped (too few well-aligned frames)"}']
     if region_votes:
         lines.append(f'Region hint: {max(region_votes, key=region_votes.get)}')
     lines.append('')
@@ -1377,6 +2037,10 @@ def parse_args():
     p.add_argument('--start-frame', type=int, default=0,
                    help='frame to start at (with --roi: tracking start frame)')
     p.add_argument('--end-frame', type=int, default=0, help='stop tracking here (0 = end)')
+    p.add_argument('--app-mode', action='store_true',
+                   help='launched from the VisionX app: emit a machine-'
+                        'readable PLATE_REPORT:: line on stdout and skip the '
+                        'browser auto-open (the app shows the report itself)')
     p.add_argument('--no-gui', action='store_true',
                    help='headless mode (requires --roi)')
     p.add_argument('--tracker', choices=['csrt', 'kcf'], default='csrt',
@@ -1402,6 +2066,10 @@ def parse_args():
     p.add_argument('--ecc-iters', type=int, default=100,
                    help='ECC alignment iterations (default 100)')
     p.add_argument('--top', type=int, default=5, help='number of candidates to output (default 5)')
+    p.add_argument('--no-sr', action='store_true',
+                   help='disable the FSRCNN super-resolution vote for small plates')
+    p.add_argument('--no-rectify', action='store_true',
+                   help='disable WPODNet quad rectification of tilted plates')
     p.add_argument('--no-pattern-prior', action='store_true',
                    help='disable the soft Greek LLL-NNNN format ranking bonus')
     p.add_argument('--no-enhance', action='store_true',
@@ -1453,7 +2121,13 @@ def main():
     # conf_thresh 0.15 (was 0.25): the tracking loop applies its own DET_ACCEPT
     # gate on top; the lib-level threshold only needs to let dusk/small-plate
     # detections (0.15-0.35 range) through for the refinement logic to weigh.
-    detector = LicensePlateDetector(detection_model=args.detector_model, conf_thresh=0.15)
+    # CPU provider explicitly: onnxruntime's CoreML EP cannot express this
+    # model's zero-detection output (dynamic {-1} shape with 0 elements) and
+    # throws + retries on EVERY empty frame — night footage spammed hundreds
+    # of errors/min and wasted the failed-inference time. The tiny YOLOv9-t
+    # runs in a few ms on CPU anyway (it only ever sees small crops).
+    detector = LicensePlateDetector(detection_model=args.detector_model, conf_thresh=0.15,
+                                    providers=['CPUExecutionProvider'])
     model_names = [m.strip() for m in args.ocr_model.split(',') if m.strip()]
     recognizers = [{'name': m, 'rec': LicensePlateRecognizer(m, device='cpu'),
                     'gray': False} for m in model_names]
@@ -1466,23 +2140,69 @@ def main():
         except (ValueError, AssertionError):
             fail('--roi must be "x,y,w,h" with positive w,h')
         start_frame = args.start_frame
+        samples = collect_samples(cap, detector, start_frame, roi, args, fps=fps)
+        segments = [(start_frame, roi)]
     else:
-        start_frame, roi = gui_pick_roi(cap, total_frames, fps, args.start_frame)
-        if roi is None:
-            log('aborted.')
-            return
-        log(f'ROI {roi} @ frame {start_frame}')
+        # Multi-segment collection: the same vehicle often shows up more
+        # than once (arrives early, leaves late). After each segment the
+        # user can seek anywhere and track another appearance — the frames
+        # of ALL segments feed one common vote.
+        samples = []
+        segments = []
+        next_pos = args.start_frame
+        while True:
+            seg_start, seg_roi = gui_pick_roi(cap, total_frames, fps, next_pos,
+                                              detector=detector)
+            if seg_roi is None:
+                if segments:
+                    break  # user aborted the EXTRA pick — analyse what we have
+                log('aborted.')
+                return
+            log(f'ROI {seg_roi} @ frame {seg_start} (τμήμα {len(segments) + 1})')
+            if seg_roi[2] < 90:
+                # Ground-truth calibrated: below ~90px plate width the OCR
+                # ceiling dominates (documented Y/Z/3/4 confusions). Steer
+                # the user toward the vehicle's closest pass BEFORE they
+                # spend minutes tracking a segment that can't read well.
+                log(f'  ΠΡΟΣΟΧΗ: η πινακίδα είναι ~{seg_roi[2]}px — κάτω από '
+                    f'~90px οι χαρακτήρες συγχέονται συστηματικά. Αν το όχημα '
+                    f'φαίνεται πιο ΚΟΝΤΑ σε άλλο σημείο του βίντεο, προτίμησε '
+                    f'εκείνο (ή πρόσθεσε το ως τμήμα με n στο τέλος).')
+            seg_samples = collect_samples(cap, detector, seg_start, seg_roi,
+                                          args, fps=fps)
+            segments.append((seg_start, seg_roi))
+            samples.extend(seg_samples)
+            log(f'Τμήμα {len(segments)}: {len(seg_samples)} καρέ — '
+                f'σύνολο {len(samples)}')
+            next_pos = max((s.frame_idx for s in seg_samples),
+                           default=seg_start) + 1
+            if not samples or next_pos >= total_frames - 1:
+                break
+            if not ask_more_segments(cap, next_pos, total_frames):
+                break
+        start_frame, roi = segments[0]
+        # Segments may overlap if the user seeks backwards — one vote per
+        # video frame (first observation wins) so no frame double-votes.
+        seen_idx: set = set()
+        samples = [s for s in samples
+                   if not (s.frame_idx in seen_idx or seen_idx.add(s.frame_idx))]
 
-    samples = collect_samples(cap, detector, start_frame, roi, args, fps=fps)
+    # Keep a full frame for the processing banner (GUI runs), then free the
+    # capture — every stage after this works on the collected crops.
+    busy_frame = None
+    if not args.no_gui and samples:
+        busy_frame = seek(cap, min(max(s.frame_idx for s in samples),
+                                   total_frames - 1))
     cap.release()
-    if not args.no_gui:
-        cv2.destroyAllWindows()
 
     if not samples:
         fail('no usable plate samples collected')
-    log(f'\nCollected {len(samples)} samples, rectifying + aligning...')
+    seg_note = f' από {len(segments)} τμήματα' if len(segments) > 1 else ''
+    log(f'\nCollected {len(samples)} samples{seg_note}, rectifying + aligning...')
 
+    show_busy(busy_frame, 1, f'ECC alignment of {len(samples)} frames')
     ref, aligned = rectify_and_align(samples, args)
+    show_busy(busy_frame, 2, 'multi-frame fusion')
     fused_img, fused_n = fuse(samples, args.fuse_top)
 
     n_pool = len(ocr_pool(samples, args.max_ocr_frames))
@@ -1490,26 +2210,42 @@ def main():
         f'{" + fused" if fused_img is not None else ""}'
         f'{"" if args.no_enhance else ", x4 tonal variants"}'
         f', x{len(recognizers)} models)...')
+    show_busy(busy_frame, 3,
+              f'OCR: {n_pool} crops x {len(recognizers)} models')
     candidates, gr_candidates, reads, region_votes = ocr_and_vote(
         recognizers, samples, fused_img, args, fused_n=fused_n)
+    readability = assess_readability(candidates, reads, samples)
 
+    show_busy(busy_frame, 4, 'writing the report')
     out_dir = args.output or str(video_path.parent / f'{video_path.stem}_plate')
     json_path, report_path = save_outputs(
         video_path, out_dir, samples, ref, fused_img, candidates,
         reads, region_votes, roi, start_frame, fps, args,
-        fused_n=fused_n, gr_candidates=gr_candidates)
+        fused_n=fused_n, gr_candidates=gr_candidates, readability=readability)
+    if not args.no_gui:
+        cv2.destroyAllWindows()
 
     summary = print_results(candidates, gr_candidates, reads, region_votes,
-                            len(samples), aligned, fused_n)
+                            len(samples), aligned, fused_n,
+                            readability=readability)
     # Plain-text copy of the console summary, saved with the artifacts.
     with open(Path(out_dir) / 'summary.txt', 'w', encoding='utf-8') as f:
-        f.write(f'Video: {video_path}\nROI: {roi} @ frame {start_frame}\n\n')
-        f.write('\n'.join(summary) + '\n')
+        f.write(f'Video: {video_path}\nROI: {roi} @ frame {start_frame}\n')
+        if len(segments) > 1:
+            f.write('Τμήματα: ' + ' · '.join(
+                f'#{i + 1} frame {sf} roi {r}'
+                for i, (sf, r) in enumerate(segments)) + '\n')
+        f.write('\n' + '\n'.join(summary) + '\n')
     log('\nScore = σχετική κατάταξη (0-1), όχι πιθανότητα. "?" = αβέβαιη θέση — '
         'δες εναλλακτικές ανά θέση στο report.')
     if report_path:
         log(f'\nΑναφορά:  {report_path}')
-        if not args.no_gui:
+        if getattr(args, 'app_mode', False):
+            # The VisionX app parses this stdout marker and shows the report
+            # in its own results view (with open-in-browser / show-folder
+            # buttons there) — so no browser auto-open in this mode.
+            print(f'PLATE_REPORT::{Path(report_path).resolve()}', flush=True)
+        elif not args.no_gui:
             # Open the report right away (user request): the analysis ends
             # with the human READING it, not hunting for a file. Batch runs
             # (--no-gui) stay silent so scripts don't spawn browser windows.

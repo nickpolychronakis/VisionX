@@ -27,6 +27,11 @@ import stitch as stitch_mod
 # 0.88 because viewpoint/white-balance changes push same-object similarity
 # down and different-object similarity up. Field-calibrate over time.
 APPEARANCE_XCAM_THRESHOLD = 0.92
+# Review tier (user workflow): pairs BELOW the auto-match gates but strong
+# enough to deserve a human look — shown as "πιθανές συσχετίσεις" with an
+# accept toggle, never auto-merged.
+APPEARANCE_UNCERTAIN = 0.85
+PLATE_UNCERTAIN = 0.60
 # With a plate agreement, appearance only needs to not-contradict.
 APPEARANCE_WITH_PLATE_THRESHOLD = 0.80
 PLATE_STRONG = 0.85
@@ -128,10 +133,28 @@ def find_reappearances(tracks: dict) -> list:
     return pairs
 
 
-def match_videos(per_video: dict) -> list:
+def pair_score_uncertain(ta: dict, tb: dict):
+    """Sub-threshold pair evidence for HUMAN review. Returns (score,
+    evidence) for pairs in the uncertain band, else None. Kept separate from
+    pair_score so the auto-merge gates stay untouched."""
+    if ta['class'] != tb['class']:
+        return None
+    app = stitch_mod.similarity(ta, tb)
+    plate = plate_match_score(ta.get('plate'), tb.get('plate'))
+    if plate is not None and PLATE_UNCERTAIN <= plate < PLATE_STRONG:
+        return (0.4 * plate, 'plate (αβέβαιη)')
+    if APPEARANCE_UNCERTAIN <= app < APPEARANCE_XCAM_THRESHOLD:
+        return (0.3 * app, 'εμφάνιση (αβέβαιη)')
+    return None
+
+
+def match_videos(per_video: dict, with_uncertain: bool = False):
     """per_video: {video_name: tracks_dict (pre-report, with _emb_* intact)}.
 
-    Returns groups: [{'members': [(video, track_id)], 'score', 'evidence'}].
+    Returns groups: [{'members': [(video, track_id)], 'score', 'evidence'}] —
+    or (groups, uncertain_pairs) when with_uncertain=True, where
+    uncertain_pairs are sub-threshold candidate pairs for human review
+    (members not already in the same confident group).
     Greedy best-pair-first with union-find; a group never contains two
     objects from the SAME video (they were already stitched there — two
     same-video tracks are two different physical objects by construction).
@@ -193,7 +216,24 @@ def match_videos(per_video: dict) -> list:
             'score': round(score_of.get(r, 0.0), 3),
         })
     out.sort(key=lambda g: -g['score'])
-    return out
+    if not with_uncertain:
+        return out
+
+    uncertain = []
+    for (va, ida, ta), (vb, idb, tb) in itertools.combinations(items, 2):
+        if va == vb:
+            continue
+        if find(idx[(va, ida)]) == find(idx[(vb, idb)]):
+            continue  # already auto-matched confidently
+        scored = pair_score_uncertain(ta, tb)
+        if scored:
+            uncertain.append({
+                'members': sorted([(va, ida), (vb, idb)]),
+                'evidence': scored[1],
+                'score': round(scored[0], 3),
+            })
+    uncertain.sort(key=lambda g: -g['score'])
+    return out, uncertain[:40]  # cap: a wall of weak pairs helps nobody
 
 
 def combined_plate(group_tracks: list, reader) -> dict | None:

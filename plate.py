@@ -1229,10 +1229,15 @@ def rectify_and_align(samples: list[Sample], args) -> tuple:
 _WPOD = {'predictor': None, 'failed': False}
 
 RECTIFY_MIN_CONF = 0.60   # quad confidence gate
-RECTIFY_MIN_TILT = 6.0    # degrees — research ablation: rectification gains
-                          # +14-17pp on oblique plates but ~0 (slightly
-                          # negative) on frontal ones, so near-frontal crops
-                          # keep the plain resize path.
+RECTIFY_MIN_TILT = 3.0    # degrees. History: started at 6° (research: no
+                          # gain on frontal plates + quad estimator noise is
+                          # ±2-3°). Lowered to 3° on user field judgment: on
+                          # MARGINAL real plates a few degrees can flip Z<->I,
+                          # and since the levelled rendering VOTES (never
+                          # replaces), a phantom-tilt correction can only lose
+                          # the vote — the gate is purely a compute filter.
+                          # Measured on ground truth: no quality change in
+                          # either direction; cost negligible.
 
 
 def _wpod_predictor(args):
@@ -1295,6 +1300,35 @@ def estimate_quad(crop: np.ndarray, args):
         return None, 0.0
 
 
+def level_by_quad(crop: np.ndarray, quad):
+    """Orientation-only levelling: warp the WHOLE crop so the plate quad
+    becomes horizontal. The quad supplies ORIENTATION only — never crop
+    bounds: WPOD's quad can under-cover the plate (verified: it clipped 'KH'
+    off a 'KHE4718' crop and the OCR then misread). Expanded canvas, so
+    pixels are never cut. Returns the levelled crop or None. Shared by the
+    interactive tool and the auto-ALPR pass (plate_core)."""
+    try:
+        q = np.float32(quad)
+        wt = (np.linalg.norm(q[1] - q[0]) + np.linalg.norm(q[2] - q[3])) / 2
+        ht = (np.linalg.norm(q[3] - q[0]) + np.linalg.norm(q[2] - q[1])) / 2
+        dstq = np.float32([(0, 0), (wt, 0), (wt, ht), (0, ht)])
+        M = cv2.getPerspectiveTransform(q, dstq)
+        hh, ww = crop.shape[:2]
+        corners = cv2.perspectiveTransform(
+            np.float32([[(0, 0), (ww, 0), (ww, hh), (0, hh)]]), M)[0]
+        mn = corners.min(axis=0)
+        mx = corners.max(axis=0)
+        T = np.array([[1, 0, -mn[0]], [0, 1, -mn[1]], [0, 0, 1]],
+                     dtype=np.float64)
+        out_w = max(8, int(math.ceil(mx[0] - mn[0])))
+        out_h = max(8, int(math.ceil(mx[1] - mn[1])))
+        return cv2.warpPerspective(crop, T @ M.astype(np.float64),
+                                   (out_w, out_h), flags=cv2.INTER_CUBIC,
+                                   borderMode=cv2.BORDER_REPLICATE)
+    except Exception:  # noqa: BLE001
+        return None
+
+
 def rectify_by_quads(samples: list[Sample], cw: int, ch: int, args) -> int:
     """Warp each crop's estimated plate quad to the fronto-parallel canonical
     rectangle (pure geometric transform of real pixels — evidentiarily
@@ -1317,29 +1351,9 @@ def rectify_by_quads(samples: list[Sample], cw: int, ch: int, args) -> int:
         tilt = _quad_tilt_deg(quad)
         if tilt < RECTIFY_MIN_TILT:
             continue
-        # The quad supplies ORIENTATION only — never crop bounds: WPOD's
-        # quad can under-cover the plate (verified: it clipped 'KH' off a
-        # 'KHE4718' crop and the OCR then misread). The homography that maps
-        # the quad to a level rectangle is applied to the WHOLE crop with an
-        # expanded canvas, so pixels are never cut — the plate just comes
-        # out horizontal inside it.
-        q = np.float32(quad)
-        wt = (np.linalg.norm(q[1] - q[0]) + np.linalg.norm(q[2] - q[3])) / 2
-        ht = (np.linalg.norm(q[3] - q[0]) + np.linalg.norm(q[2] - q[1])) / 2
-        dstq = np.float32([(0, 0), (wt, 0), (wt, ht), (0, ht)])
-        M = cv2.getPerspectiveTransform(q, dstq)
-        hh, ww = s.crop.shape[:2]
-        corners = cv2.perspectiveTransform(
-            np.float32([[(0, 0), (ww, 0), (ww, hh), (0, hh)]]), M)[0]
-        mn = corners.min(axis=0)
-        mx = corners.max(axis=0)
-        T = np.array([[1, 0, -mn[0]], [0, 1, -mn[1]], [0, 0, 1]],
-                     dtype=np.float64)
-        out_w = max(8, int(math.ceil(mx[0] - mn[0])))
-        out_h = max(8, int(math.ceil(mx[1] - mn[1])))
-        levelled = cv2.warpPerspective(s.crop, T @ M.astype(np.float64),
-                                       (out_w, out_h), flags=cv2.INTER_CUBIC,
-                                       borderMode=cv2.BORDER_REPLICATE)
+        levelled = level_by_quad(s.crop, quad)
+        if levelled is None:
+            continue
         s.rect_level = cv2.resize(levelled, (cw, ch),
                                   interpolation=cv2.INTER_CUBIC)
         n_rect += 1

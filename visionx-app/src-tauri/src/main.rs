@@ -360,6 +360,11 @@ async fn process_videos(
                                 reports.push(path.to_string());
                             }
                         },
+                        Some("match_review") => {
+                            if let Some(path) = json["path"].as_str() {
+                                let _ = app.emit("match-review", path.to_string());
+                            }
+                        },
                         Some("frame") => {
                             let _ = app.emit("frame", FrameEvent {
                                 video: json["video"].as_str().unwrap_or("").to_string(),
@@ -372,6 +377,19 @@ async fn process_videos(
                                 event_type: "model_download".to_string(),
                                 message,
                             });
+                        },
+                        // Plain progress-status lines from vision.py (frame
+                        // counting, plate pass, TRT build...). This arm was
+                        // MISSING — every Greek status message was silently
+                        // dropped and long quiet phases read as hangs.
+                        Some("status") => {
+                            let message = json["message"].as_str().unwrap_or("").to_string();
+                            if !message.is_empty() {
+                                let _ = app.emit("status", StatusEvent {
+                                    event_type: "model_download".to_string(),
+                                    message,
+                                });
+                            }
                         },
                         Some("error") => {
                             let message = json["message"].as_str().unwrap_or("Unknown error").to_string();
@@ -545,6 +563,55 @@ fn show_in_folder(path: String) -> Result<(), String> {
             .map_err(|e| format!("Failed to open folder: {}", e))?;
     }
     Ok(())
+}
+
+/// Read the match-review JSON written by vision.py (avoids fs-plugin
+/// capability plumbing for a single internal file).
+#[tauri::command]
+fn read_match_review(path: String) -> Result<String, String> {
+    std::fs::read_to_string(&path).map_err(|e| format!("Cannot read review file: {}", e))
+}
+
+/// Second phase of the match-review workflow: hand the user's accept/reject
+/// decisions to vision.py --finalize-match and return the combined report
+/// path. Fast (no model load), so a blocking wait is fine.
+#[tauri::command]
+async fn finalize_match(app: AppHandle, session: String, decisions: String) -> Result<String, String> {
+    let data_dir = app.path().app_data_dir()
+        .map_err(|e| format!("Failed to get data dir: {}", e))?;
+    let python_exe = setup::python_exe_path(&data_dir);
+    let scripts_dir = setup::scripts_dir_path(&data_dir);
+    let packages_dir = setup::packages_dir_path(&data_dir);
+    let script = scripts_dir.join("vision.py");
+
+    // Decisions arrive as a JSON string from the frontend — persist next to
+    // the session so the run is reproducible/auditable.
+    let decisions_path = std::path::Path::new(&session)
+        .with_file_name("visionx_match_decisions.json");
+    std::fs::write(&decisions_path, &decisions)
+        .map_err(|e| format!("Cannot write decisions: {}", e))?;
+
+    let mut cmd = Command::new(&python_exe);
+    cmd.arg(script.to_string_lossy().to_string())
+        .arg("--finalize-match").arg(&session)
+        .arg("--decisions").arg(decisions_path.to_string_lossy().to_string())
+        .env("PYTHONUTF8", "1")
+        .env("PYTHONPATH", format!("{}{}{}",
+            packages_dir.to_string_lossy(),
+            if cfg!(windows) { ";" } else { ":" },
+            scripts_dir.to_string_lossy()))
+        .current_dir(&scripts_dir);
+    let output = cmd.output()
+        .map_err(|e| format!("Failed to run finalize: {}", e))?;
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    for line in stdout.lines() {
+        if let Some(path) = line.strip_prefix("COMBINED_REPORT::") {
+            return Ok(path.trim().to_string());
+        }
+    }
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    Err(format!("Finalize failed: {}",
+        stderr.lines().rev().take(6).collect::<Vec<_>>().join(" | ")))
 }
 
 /// Video formats accepted by the pipeline (kept in sync with vision.py's
@@ -798,6 +865,8 @@ fn main() {
             show_in_folder,
             run_plate_tool,
             list_videos_in_dir,
+            read_match_review,
+            finalize_match,
             // Updates
             check_for_updates,
             install_update,

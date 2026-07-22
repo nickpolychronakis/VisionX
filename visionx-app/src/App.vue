@@ -4,6 +4,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen, UnlistenFn } from "@tauri-apps/api/event";
 import { open } from "@tauri-apps/plugin-dialog";
 import AboutModal from "./components/AboutModal.vue";
+import MatchReview from "./components/MatchReview.vue";
 import FileSelector from "./components/FileSelector.vue";
 import SettingsPanel from "./components/SettingsPanel.vue";
 import ProgressBar from "./components/ProgressBar.vue";
@@ -12,7 +13,7 @@ import SetupWizard from "./components/SetupWizard.vue";
 
 // App state — the app opens STRAIGHT into the workspace (2026 desktop UX:
 // no landing page; identity/version/updates live in the About modal).
-type AppView = "loading" | "setup" | "select" | "processing" | "results";
+type AppView = "loading" | "setup" | "select" | "processing" | "review" | "results";
 const currentView = ref<AppView>("loading");
 const showAbout = ref(false);
 
@@ -106,6 +107,11 @@ let unlistenProgress: UnlistenFn | null = null;
 let unlistenStatus: UnlistenFn | null = null;
 let unlistenFrame: UnlistenFn | null = null;
 let unlistenPlateReport: UnlistenFn | null = null;
+let unlistenMatchReview: UnlistenFn | null = null;
+
+// Match-review session (multi-camera runs): path to the review JSON —
+// when set, processing completion routes through the review screen.
+const matchReviewPath = ref<string | null>(null);
 
 // Live annotated preview frame (base64 JPEG) during analysis
 const liveFrame = ref("");
@@ -200,6 +206,12 @@ onMounted(async () => {
     },
   );
 
+  // Multi-camera runs emit a review session: confident matches to verify,
+  // uncertain ones to judge — the review screen opens after processing.
+  unlistenMatchReview = await listen<string>("match-review", (event) => {
+    matchReviewPath.value = event.payload;
+  });
+
   // Finished plate-tool runs: show their report in the results view like a
   // video report (same open-in-browser / show-folder affordances there).
   unlistenPlateReport = await listen<string>("plate-report", (event) => {
@@ -215,6 +227,7 @@ onUnmounted(() => {
   if (unlistenStatus) unlistenStatus();
   if (unlistenFrame) unlistenFrame();
   if (unlistenPlateReport) unlistenPlateReport();
+  if (unlistenMatchReview) unlistenMatchReview();
 });
 
 // Video resolution detection
@@ -264,6 +277,7 @@ async function startProcessing() {
   processingError.value = null;
   statusMessage.value = "";
   liveFrame.value = "";
+  matchReviewPath.value = null;
 
   progress.value = {
     currentVideo: selectedFiles.value[0],
@@ -299,7 +313,9 @@ async function startProcessing() {
     if (result.length > 0) {
       selectedReport.value = result[0];
     }
-    currentView.value = "results";
+    // Multi-camera runs pass through the match-review screen first (user
+    // workflow: verify/reject the correlations, then the combined report).
+    currentView.value = matchReviewPath.value ? "review" : "results";
   } catch (error) {
     const errorStr = String(error);
     // Don't show error if it was cancelled
@@ -311,6 +327,12 @@ async function startProcessing() {
   } finally {
     isProcessing.value = false;
   }
+}
+
+function onReviewDone(reportPath: string) {
+  if (!reports.value.includes(reportPath)) reports.value.push(reportPath);
+  selectedReport.value = reportPath;
+  currentView.value = "results";
 }
 
 async function cancelProcessing() {
@@ -432,6 +454,19 @@ function startNew() {
             🚘 Ανάγνωση Πινακίδας
           </button>
         </div>
+      </div>
+
+      <!-- Match Review View (multi-camera): human verdict on correlations -->
+      <div
+        v-else-if="currentView === 'review' && matchReviewPath"
+        class="view-review"
+        key="review"
+      >
+        <MatchReview
+          :review-path="matchReviewPath"
+          @done="onReviewDone"
+          @skip="currentView = 'results'"
+        />
       </div>
 
       <!-- Processing View -->

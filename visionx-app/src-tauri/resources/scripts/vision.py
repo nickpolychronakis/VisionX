@@ -155,6 +155,118 @@ def run_prompt_filter(tracks: dict, cfg: dict, args, json_progress: bool):
         log_stderr(f'Filtering failed ({e})')
 
 
+# Live-preview plate outlines: lazy detector + quad estimator, loaded on the
+# first preview tick. 'failed' latches after any error so a broken optional
+# stack can never slow or break the analysis loop.
+_PREVIEW_PLATES: dict = {'det': None, 'mod': None, 'failed': False}
+
+
+def _is_host_box(result, i: int) -> bool:
+    """Per-frame version of the host-vehicle signature (see tracking.py):
+    a wide vehicle box glued to the bottom edge of the frame = the
+    recording car detecting its own hood."""
+    try:
+        if int(result.boxes.cls[i]) not in (2, 3, 5, 7):
+            return False
+        x1, y1, x2, y2 = (float(v) for v in result.boxes.xyxy[i])
+        fh, fw = result.orig_img.shape[:2]
+        return y2 >= 0.96 * fh and y1 >= 0.45 * fh and (x2 - x1) >= 0.35 * fw
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def draw_plate_quads(annotated: np.ndarray, result) -> None:
+    """Draw the TRUE plate outline (yellow quad) on the live preview frame —
+    mirrors the interactive plate tool (user request: not a screen-aligned
+    rectangle, the plate's real frame even at an angle). Runs ONLY on
+    preview ticks (~2Hz) and only on the 4 largest vehicles, so the cost
+    never touches per-frame analysis throughput."""
+    if _PREVIEW_PLATES['failed']:
+        return
+    try:
+        if _PREVIEW_PLATES['det'] is None:
+            from open_image_models import LicensePlateDetector
+            import plate as plate_mod
+            _PREVIEW_PLATES['det'] = LicensePlateDetector(
+                detection_model=plate_mod.DEFAULT_DETECTOR_MODEL,
+                conf_thresh=0.2, providers=['CPUExecutionProvider'])
+            _PREVIEW_PLATES['mod'] = plate_mod
+        det = _PREVIEW_PLATES['det']
+        pm = _PREVIEW_PLATES['mod']
+        boxes = result.boxes
+        if boxes is None or len(boxes) == 0:
+            return
+        vehicles = []  # COCO: 2 car, 3 motorcycle, 5 bus, 7 truck
+        for i in range(len(boxes)):
+            if int(boxes.cls[i]) in (2, 3, 5, 7):
+                x1, y1, x2, y2 = (int(v) for v in boxes.xyxy[i])
+                vehicles.append(((x2 - x1) * (y2 - y1), x1, y1, x2, y2))
+        for _, x1, y1, x2, y2 in sorted(vehicles, reverse=True)[:4]:
+            crop = result.orig_img[max(0, y1):y2, max(0, x1):x2]
+            if crop.size == 0:
+                continue
+            dets = det.predict(crop)
+            if not dets:
+                continue
+            d = max(dets, key=lambda x: float(x.confidence))
+            bb = d.bounding_box
+            # Plate-geometry sanity (field case: the dashcam's own hood is a
+            # "vehicle" and its timestamp/logo bar detected as a plate): a
+            # real plate is a FRACTION of its vehicle's width with plate-like
+            # aspect — overlay bars span most of the crop.
+            pw, ph = float(bb.x2 - bb.x1), float(bb.y2 - bb.y1)
+            if ph <= 0 or pw > 0.55 * crop.shape[1]                     or not (1.5 <= pw / ph <= 8.0):
+                continue
+            px1, py1 = max(0, int(bb.x1)), max(0, int(bb.y1))
+            pcrop = crop[py1:int(bb.y2), px1:int(bb.x2)]
+            if pcrop.size == 0:
+                continue
+            quad, _ = pm.estimate_quad(pcrop, None)
+            if quad is None:
+                quad = pm.bright_plate_quad(pcrop)  # saturated night plates
+            if quad is not None:
+                pts = np.array([[int(qx) + px1 + x1, int(qy) + py1 + y1]
+                                for qx, qy in quad])
+            else:
+                # No quad estimable — the detector's box is still the
+                # plate's frame, just axis-aligned.
+                pts = np.array([[x1 + px1, y1 + py1],
+                                [x1 + int(bb.x2), y1 + py1],
+                                [x1 + int(bb.x2), y1 + int(bb.y2)],
+                                [x1 + px1, y1 + int(bb.y2)]])
+            cv2.polylines(annotated, [pts], True, (0, 255, 255), 2)
+    except Exception:  # noqa: BLE001 — preview extras must never break runs
+        _PREVIEW_PLATES['failed'] = True
+
+
+def run_reappearance(tracks: dict, json_progress: bool):
+    """Annotate possible same-video re-appearances (vehicle/person left and
+    came back). Runs AFTER plates (strong evidence needs candidate lists)
+    and BEFORE prepare_for_report (appearance needs the _emb_* embeddings
+    that stitching left on the tracks). Annotation-only by design — the
+    report links the cards, the investigator decides."""
+    if len(tracks) < 2:
+        return
+    try:
+        from cross_match import find_reappearances
+        pairs = find_reappearances(tracks)
+        for p in pairs:
+            tracks[p['a']].setdefault('reappearance', []).append(
+                {'other': p['b'], 'when': 'later', 'gap': p['gap'],
+                 'score': p['score'], 'evidence': p['evidence']})
+            tracks[p['b']].setdefault('reappearance', []).append(
+                {'other': p['a'], 'when': 'earlier', 'gap': p['gap'],
+                 'score': p['score'], 'evidence': p['evidence']})
+        if pairs:
+            log_stderr(f'Re-appearance: {len(pairs)} possible same-object '
+                       f'pair(s) flagged')
+            if json_progress:
+                emit_json('status',
+                          message=f'Πιθανές επανεμφανίσεις: {len(pairs)}')
+    except Exception as e:  # noqa: BLE001 — annotation must never kill a run
+        log_stderr(f'Re-appearance pass failed ({e})')
+
+
 def run_auto_plates(tracks: dict, cfg: dict, json_progress: bool,
                     fps: float | None = None, video_path: str | None = None):
     """Attach plate candidates to vehicle tracks (in place). Failures only
@@ -408,6 +520,74 @@ def export_to_coreml(pt_model: str, prompts: list[str], json_progress: bool = Fa
         return None
 
 
+def closed_set_trt_engine(pt_model: str, data_dir: str | None,
+                          req_imgsz: int, json_progress: bool) -> str | None:
+    """DYNAMIC TensorRT engine for the closed-set model (NVIDIA only).
+
+    Design decisions (user-driven):
+    - dynamic=True: ONE engine per machine covers every imgsz up to 1920 —
+      changing the resolution or running new videos never rebuilds (the
+      build is ~10 min once, cached forever in the data models dir).
+    - FP32 (half=False): outputs must match the PyTorch reference as closely
+      as possible — same detections → same tracks (evidentiary consistency
+      beats the extra FP16 speed).
+    - ANY failure returns None and the caller stays on PyTorch — never
+      worse than today. VISIONX_NO_TRT=1 disables explicitly.
+    """
+    if not torch.cuda.is_available() or os.environ.get('VISIONX_NO_TRT') == '1':
+        return None
+    if req_imgsz and not (960 <= req_imgsz <= 1920):
+        # The dynamic profile (built at 1920) covers [960, 1920] — the
+        # ultralytics exporter sets the min shape to imgsz/2. Above it a 4K
+        # profile would exceed laptop VRAM; below it PyTorch is fast anyway
+        # (small inputs) and stays the reference runtime.
+        log_stderr(f'imgsz {req_imgsz} outside the TensorRT profile '
+                   f'[960, 1920] — PyTorch runtime for this run')
+        return None
+    try:
+        import tensorrt as trt  # noqa: F401 — availability probe
+        log_stderr(f'TensorRT version: {trt.__version__}')
+    except Exception as e:  # broken wrapper OR missing — same fallback
+        log_stderr(f'TensorRT unavailable ({e}) — PyTorch runtime')
+        return None
+
+    stem = Path(pt_model).stem
+    cache_dirs = []
+    if data_dir:
+        cache_dirs.append(Path(data_dir) / 'models')
+    cache_dirs.append(Path(pt_model).parent)
+    for d in cache_dirs:
+        cached = d / f'{stem}_dyn.engine'
+        if cached.exists():
+            log_stderr(f'TensorRT engine cache hit: {cached}')
+            return str(cached)
+
+    target = cache_dirs[0] / f'{stem}_dyn.engine'
+    log_stderr('Building dynamic TensorRT engine (one-time, ~10 min)...')
+    if json_progress:
+        # model_download is the status type the app renders prominently —
+        # without a visible message a 10-minute silent build reads as a hang.
+        emit_json('model_download',
+                  message='Βελτιστοποίηση μοντέλου για την κάρτα γραφικών '
+                          '(μία φορά, ~10 λεπτά — δεν έχει κολλήσει)...')
+    try:
+        exported = YOLO(pt_model).export(
+            format='engine', dynamic=True, imgsz=1920, half=False,
+            device=0, workspace=4, batch=1, verbose=False)
+        exp = Path(exported)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        if exp.resolve() != target.resolve():
+            exp.replace(target)
+        log_stderr(f'TensorRT engine ready: {target}')
+        if json_progress:
+            emit_json('model_download',
+                      message='Η βελτιστοποίηση ολοκληρώθηκε — έναρξη ανάλυσης')
+        return str(target)
+    except Exception as e:  # noqa: BLE001 — fall back, never fail the run
+        log_stderr(f'TensorRT engine build failed ({e}) — PyTorch runtime')
+        return None
+
+
 def export_to_tensorrt(pt_model: str, prompts: list[str], json_progress: bool = False, data_dir: str | None = None) -> Path | None:
     """Export PyTorch model to TensorRT (NVIDIA GPU, one-time operation).
 
@@ -518,11 +698,22 @@ def process_video(source: str, yolo: YOLO, cfg: dict, args, video_index: int = 1
 
     # Get video info
     cap = cv2.VideoCapture(source)
+    if not cap.isOpened():
+        # Unreadable input (missing codec, corrupt file, or not a video at
+        # all). Clean skip with a user-facing message — this used to crash
+        # with UnboundLocalError further down.
+        cap.release()
+        log_stderr(f'Skipping {source_path.name}: could not open as video')
+        if json_progress:
+            emit_json('status', message=f'Παράβλεψη {source_path.name}: '
+                                        f'δεν αναγνωρίζεται ως βίντεο')
+        return None, None
     total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
     fps_metadata = cap.get(cv2.CAP_PROP_FPS)
 
     # Calculate actual fps (metadata is often wrong for security cameras)
     frames_to_check = 0
+    pos_sec = 0.0  # stays 0 when not a single frame decodes (bad stream)
     while frames_to_check < 100:
         ret, _ = cap.read()
         if not ret:
@@ -539,12 +730,35 @@ def process_video(source: str, yolo: YOLO, cfg: dict, args, video_index: int = 1
 
     cap.release()
 
+    if total_frames <= 0:
+        # DVR containers (Dahua .dav etc.) often report ZERO frames in the
+        # metadata while the stream decodes perfectly (Windows field case:
+        # both XVR .dav files were skipped and the report came out empty).
+        # Count by grab() — demux-only, no decode, orders of magnitude
+        # faster than reading — and only skip when not a single frame grabs.
+        log_stderr(f'{source_path.name}: no frame count in metadata — '
+                   f'counting frames (DVR container)...')
+        if json_progress:
+            emit_json('status', message=f'Καταμέτρηση καρέ ({source_path.name}: '
+                                        f'αρχείο DVR χωρίς μεταδεδομένα)...')
+        probe = cv2.VideoCapture(source)
+        counted = 0
+        while probe.grab():
+            counted += 1
+        probe.release()
+        total_frames = counted
+        log_stderr(f'{source_path.name}: counted {total_frames} frames')
+
     if total_frames == 0:
         # Video file may be corrupt, empty, or in unsupported format
         log_stderr(f'Skipping {source_path.name}: could not read video (0 frames detected)')
         if json_progress:
             emit_json('status', message=f'Παράβλεψη {source_path.name}: δεν μπόρεσε να αναγνωριστεί')
-        return None
+        return None, None
+
+    if not fps or fps <= 0 or fps != fps:  # 0/NaN metadata — common in .dav
+        log_stderr(f'{source_path.name}: no usable fps in metadata — assuming 25')
+        fps = 25.0
 
     # Output directory for YOLO (only if saving video/crops)
     output_dir = args.output or str(source_path.parent)
@@ -611,6 +825,41 @@ def process_video(source: str, yolo: YOLO, cfg: dict, args, video_index: int = 1
                     fps=round(processing_fps, 1)
                 )
                 last_progress_time = now
+                # Live preview: the annotated frame (boxes + track IDs + conf)
+                # rides the same 0.5s throttle. Downscaled + JPEG'd it is
+                # ~30-60KB per event — negligible next to inference cost.
+                # Suppressed under parallel workers: their stdout writes
+                # exceed PIPE_BUF, so concurrent big lines could interleave
+                # and corrupt the JSON stream the app parses.
+                preview_ok = not (getattr(args, 'parallel', 1) > 1
+                                  and total_videos > 1)
+                if preview_ok:
+                    try:
+                        # The host car detects its own hood as a "car"
+                        # glued to the bottom edge — excluded from the
+                        # PREVIEW drawing only (the analysis keeps the
+                        # track; the report badges it).
+                        try:
+                            keep = [i for i in range(len(result.boxes))
+                                    if not _is_host_box(result, i)]
+                            shown = (result[keep]
+                                     if len(keep) < len(result.boxes) else result)
+                        except Exception:
+                            shown = result
+                        annotated = shown.plot(line_width=2)
+                        draw_plate_quads(annotated, shown)
+                        h, w = annotated.shape[:2]
+                        if w > 720:
+                            annotated = cv2.resize(
+                                annotated, (720, int(h * 720 / w)),
+                                interpolation=cv2.INTER_AREA)
+                        ok, buf = cv2.imencode(
+                            '.jpg', annotated, [cv2.IMWRITE_JPEG_QUALITY, 60])
+                        if ok:
+                            emit_json('frame', video=source_path.name,
+                                      data=base64.b64encode(buf).decode('ascii'))
+                    except Exception:
+                        pass  # preview is best-effort; never break analysis
 
         if save_report and result.boxes is not None and len(result.boxes):
             for i in range(len(result.boxes)):
@@ -653,11 +902,14 @@ def process_video(source: str, yolo: YOLO, cfg: dict, args, video_index: int = 1
     # Post-process: derived fields, then the offline stitching pass merges
     # fragmented tracklets of the same physical object (ROADMAP Phase A).
     tracks = collector.finalize()
+    for t in tracks.values():
+        t['_video_fps'] = fps  # playback overlay needs frame->second mapping
     n_raw = len(tracks)
     tracks = run_stitching(tracks, cfg, json_progress)
     run_auto_plates(tracks, cfg, json_progress, fps=fps, video_path=source)
     run_face_shots(tracks, cfg, json_progress)
     run_attributes(tracks, cfg, json_progress)
+    run_reappearance(tracks, json_progress)
     run_prompt_filter(tracks, cfg, args, json_progress)
 
     log_stderr(f'Processing complete: {source_path.name} — {n_raw} tracklets '
@@ -683,6 +935,114 @@ def process_video(source: str, yolo: YOLO, cfg: dict, args, video_index: int = 1
     return report_path, None
 
 
+def run_finalize_match(args) -> str | None:
+    """Second phase of the review workflow: read the pickled match session +
+    the user's accept/reject decisions and produce ONE combined report for
+    all videos (matched objects merged into single cards, intervals tagged
+    with their source video, plates re-voted over the union of snapshots).
+    Runs WITHOUT loading the detection model — it only reshapes stored data."""
+    import pickle
+    json_progress = getattr(args, 'json_progress', False)
+    with open(args.finalize_match, 'rb') as f:
+        sess = pickle.load(f)
+    with open(args.decisions, encoding='utf-8') as f:
+        decisions = json.load(f)
+    per_video = sess['per_video']
+    sources = sess['sources']
+    accepted = [[(m[0], int(m[1])) for m in g]
+                for g in decisions.get('groups', [])]
+    # Coalesce accepted groups that share a member: accepting the pairs
+    # A-B and B-C means A, B and C are ONE object — chain them instead of
+    # letting the second pair silently drop to a single leftover member.
+    coalesced: list[set] = []
+    for g in accepted:
+        gs = set(g)
+        merged_into = None
+        for cg in coalesced:
+            if cg & gs:
+                cg |= gs
+                merged_into = cg
+                break
+        if merged_into is None:
+            coalesced.append(gs)
+        else:  # the merge may now bridge previously separate sets
+            rest = [cg for cg in coalesced if cg is not merged_into and cg & merged_into]
+            for cg in rest:
+                merged_into |= cg
+                coalesced.remove(cg)
+    accepted = [sorted(cg) for cg in coalesced]
+
+    def tagged_intervals(t, vname):
+        ivs = t.get('intervals') or [{'start': t['first_seen'],
+                                      'end': t['last_seen'], 'file': None}]
+        return [{'start': iv['start'], 'end': iv['end'], 'file': vname}
+                for iv in ivs]
+
+    combined: dict = {}
+    used: set = set()
+    next_id = 1
+    reader = None
+    for g in accepted:
+        members = [(v, tid) for v, tid in g
+                   if v in per_video and tid in per_video[v]
+                   and (v, tid) not in used]
+        if len(members) < 2:
+            continue
+        used.update(members)
+        ts = [per_video[v][tid] for v, tid in members]
+        merged = dict(ts[0])
+        merged['intervals'] = [iv for (v, _tid), t in zip(members, ts)
+                               for iv in tagged_intervals(t, v)]
+        merged['first_seen'] = min(t['first_seen'] for t in ts)
+        merged['last_seen'] = max(t['last_seen'] for t in ts)
+        merged['confidence'] = max(t.get('confidence', 0) for t in ts)
+        merged['dwell_time'] = sum(iv['end'] - iv['start']
+                                   for iv in merged['intervals'])
+        merged['static'] = all(t.get('static') for t in ts)
+        # Snapshots: best from EVERY member so both viewpoints show (cap 8)
+        snaps = [s2 for t in ts for s2 in (t.get('snapshots') or [])]
+        snaps.sort(key=lambda x: -x.get('score', 0))
+        merged['snapshots'] = snaps[:8]
+        merged['faces'] = [f2 for t in ts for f2 in (t.get('faces') or [])][:4]
+        merged.pop('reappearance', None)
+        # Plate: re-vote over the union of snapshots (measured to beat any
+        # single camera); fall back to the best member headline.
+        if any(k in merged['class'].lower() for k in VEHICLE_KEYWORDS):
+            try:
+                import cross_match
+                if reader is None:
+                    from plate_core import PlateReader
+                    reader = PlateReader()
+                combo = cross_match.combined_plate(ts, reader)
+                if combo:
+                    merged['plate'] = combo
+            except Exception as e:  # noqa: BLE001
+                log_stderr(f'Combined plate re-vote failed ({e})')
+        combined[next_id] = merged
+        next_id += 1
+
+    for vname, tracks in per_video.items():
+        for tid, t in tracks.items():
+            if (vname, tid) in used:
+                continue
+            solo = dict(t)
+            solo['intervals'] = tagged_intervals(t, vname)
+            solo.pop('reappearance', None)
+            combined[next_id] = solo
+            next_id += 1
+
+    out_dir = str(Path(args.finalize_match).parent)
+    prepare_for_report(combined)
+    rp = generate_report(combined, out_dir, 'combined', '',
+                         video_paths={n: str(p) for n, p in sources.items()})
+    log_stderr(f'Combined report: {rp} ({len(accepted)} merges, '
+               f'{len(combined)} objects)')
+    print(f'COMBINED_REPORT::{Path(rp).resolve()}', flush=True)
+    if json_progress:
+        emit_json('report', path=rp)
+    return rp
+
+
 def run_match_mode(video_files: list, yolo: YOLO, cfg: dict, args) -> list:
     """Cross-video match mode (ROADMAP Phase Ε): process every video with
     deferred reports, match objects across videos (plates + appearance),
@@ -701,10 +1061,21 @@ def run_match_mode(video_files: list, yolo: YOLO, cfg: dict, args) -> list:
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
 
+    if not any(per_video.values()):
+        # Every video was skipped (unreadable) or produced zero tracks — a
+        # combined report here is an EMPTY page that reads as a silent
+        # failure (Windows field case with two skipped .dav files). Surface
+        # the error instead.
+        log_stderr('Match mode: no tracks from any video — no report')
+        if json_progress:
+            emit_json('error', message='Κανένα βίντεο δεν έδωσε αποτελέσματα — '
+                                       'ελέγξτε αν τα αρχεία είναι αναγνώσιμα')
+        return []
+
     if json_progress:
         emit_json('status', message='Αντιστοίχιση αντικειμένων μεταξύ βίντεο...')
     import cross_match
-    groups = cross_match.match_videos(per_video)
+    groups, uncertain = cross_match.match_videos(per_video, with_uncertain=True)
 
     # Combined plate: multiple viewpoints break the per-camera systematic
     # blur that made single-camera votes confidently wrong.
@@ -726,6 +1097,19 @@ def run_match_mode(video_files: list, yolo: YOLO, cfg: dict, args) -> list:
     log_stderr(f'Cross-match: {len(groups)} matched objects across '
                f'{len(video_files)} videos')
 
+    # Shallow-copied track dicts for the review session: prepare_for_report
+    # (below) pops raw snapshots/embeddings from the ORIGINAL dicts — these
+    # copies keep their own key set, so the pickle retains the full data.
+    _session_tracks = {v: {tid: dict(t) for tid, t in tracks.items()}
+                       for v, tracks in per_video.items()}
+
+    def groups_ui(gs):
+        return [{'members': [[v, tid] for v, tid in g['members']],
+                 'evidence': g.get('evidence'),
+                 'score': g.get('score'),
+                 'combined_plate': (g.get('combined_plate') or {}).get('plate')}
+                for g in gs]
+
     # Reports: per-video first (prepare_for_report encodes the snapshots the
     # match report also embeds), then the combined match report.
     reports = []
@@ -738,6 +1122,46 @@ def run_match_mode(video_files: list, yolo: YOLO, cfg: dict, args) -> list:
         reports.append(rp)
         if json_progress:
             emit_json('report', path=rp)
+    # Review session (user workflow): the app opens a review screen where
+    # confident matches can be REJECTED and uncertain ones ACCEPTED; the
+    # final decisions regenerate ONE combined report via --finalize-match.
+    # The pickle keeps the full pre-report tracks (raw snapshot bytes) —
+    # written BEFORE prepare_for_report mutates them; the JSON is the light
+    # UI payload (one thumbnail per track).
+    session_pkl = str(Path(output_dir) / 'visionx_match_session.pkl')
+    review_json = str(Path(output_dir) / 'visionx_match_review.json')
+    try:
+        import pickle
+        with open(session_pkl, 'wb') as f:
+            pickle.dump({'sources': sources, 'per_video': _session_tracks},
+                        f, protocol=pickle.HIGHEST_PROTOCOL)
+        ui = {'videos': {n: str(p) for n, p in sources.items()},
+              'session': session_pkl,
+              'tracks': {}, 'groups': groups_ui(groups),
+              'uncertain': groups_ui(uncertain)}
+        for vname, tracks in _session_tracks.items():
+            ui['tracks'][vname] = {}
+            for tid, t in tracks.items():
+                snaps = t.get('snapshots') or []
+                thumb = (base64.b64encode(snaps[0]['jpeg']).decode('ascii')
+                         if snaps else None)
+                ui['tracks'][vname][str(tid)] = {
+                    'class': t['class'],
+                    'first_seen': round(t['first_seen'], 1),
+                    'last_seen': round(t['last_seen'], 1),
+                    'static': bool(t.get('static')),
+                    'plate': (t.get('plate') or {}).get('plate'),
+                    'color': (t.get('attrs') or {}).get('color'),
+                    'thumb': thumb,
+                }
+        with open(review_json, 'w', encoding='utf-8') as f:
+            json.dump(ui, f, ensure_ascii=False)
+        if json_progress:
+            emit_json('match_review', path=review_json)
+        log_stderr(f'Match review session: {review_json}')
+    except Exception as e:  # noqa: BLE001 — review is additive, never fatal
+        log_stderr(f'Match session write failed ({e})')
+
     from match_report import generate_match_report
     mp = generate_match_report(per_video, groups, output_dir,
                                list(per_video.keys()))
@@ -900,6 +1324,8 @@ def process_video_chain(sources: list[str], yolo: YOLO, cfg: dict, args) -> str 
 
     # Post-process + offline stitching (shared with single-video mode).
     tracks = collector.finalize()
+    for t in tracks.values():
+        t['_video_fps'] = fps  # playback overlay needs frame->second mapping
     n_raw = len(tracks)
     tracks = run_stitching(tracks, cfg, json_progress)
     run_auto_plates(tracks, cfg, json_progress)
@@ -948,6 +1374,19 @@ def _parallel_worker(worker_args: dict) -> str | None:
     return report_path
 
 
+# Common video formats (dav = Dahua DVR format)
+VIDEO_EXTENSIONS = ['mp4', 'm4v', 'avi', 'mov', 'mkv', 'wmv', 'flv', 'webm',
+                    'mpeg', 'mpg', 'ts', 'mts', 'm2ts', '3gp', 'asf', 'dav']
+
+
+def _videos_in_dir(dir_path: Path) -> list[str]:
+    found = []
+    for ext in VIDEO_EXTENSIONS:
+        found.extend(dir_path.glob(f'*.{ext}'))
+        found.extend(dir_path.glob(f'*.{ext.upper()}'))
+    return [str(f) for f in sorted(set(found))]
+
+
 def main():
     parser = argparse.ArgumentParser(
         description='VisionX - YOLOE-26 Video Analysis',
@@ -980,6 +1419,11 @@ Examples:
     parser.add_argument('--show', action='store_true', help='Live preview')
     parser.add_argument('--parallel', type=int, default=1, help='Number of parallel workers')
     parser.add_argument('--chain', action='store_true', help='Process multiple videos as continuous sequence')
+    parser.add_argument('--finalize-match',
+                        help='match-session pickle: regenerate the combined '
+                             'report from review decisions (no model load)')
+    parser.add_argument('--decisions',
+                        help='JSON with accepted groups for --finalize-match')
     parser.add_argument('--match', action='store_true',
                         help='Cross-video matching: same event from multiple '
                              'cameras — match objects across the videos')
@@ -995,6 +1439,15 @@ Examples:
     parser.add_argument('--data-dir', default=None, help='Writable app data directory (set by Tauri)')
     parser.add_argument('--json-progress', action='store_true', help='Output JSON progress (for GUI)')
     args = parser.parse_args()
+
+    # Review-workflow second phase: reshape stored data into the combined
+    # report — no model, no video decoding, returns in seconds.
+    if args.finalize_match:
+        if not args.decisions:
+            print('Error: --finalize-match requires --decisions', file=sys.stderr)
+            sys.exit(2)
+        run_finalize_match(args)
+        return
 
     # Resolve resource directories
     resource_dir = args.resource_dir
@@ -1057,35 +1510,33 @@ Examples:
     if args.dir:
         dir_path = Path(args.dir)
         if dir_path.is_dir():
-            # Support common video formats (lowercase and uppercase)
-            extensions = [
-                'mp4', 'MP4', 'm4v', 'M4V',
-                'avi', 'AVI',
-                'mov', 'MOV',
-                'mkv', 'MKV',
-                'wmv', 'WMV',
-                'flv', 'FLV',
-                'webm', 'WEBM',
-                'mpeg', 'MPEG', 'mpg', 'MPG',
-                'ts', 'TS', 'mts', 'MTS', 'm2ts', 'M2TS',
-                '3gp', '3GP',
-                'asf', 'ASF',
-                'dav', 'DAV',  # Dahua DVR format
-            ]
-            video_files = []
-            for ext in extensions:
-                video_files.extend(dir_path.glob(f'*.{ext}'))
-            video_files = [str(f) for f in sorted(set(video_files))]
+            video_files = _videos_in_dir(dir_path)
         else:
             print(f'Error: {args.dir} is not a directory')
             return
 
-    if args.source:
-        video_files.extend(args.source)
+    for src in (args.source or []):
+        # A directory passed as a source (e.g. the app's folder picker, or a
+        # CLI glob that matched a folder) expands to the videos inside it —
+        # feeding the raw folder path to OpenCV used to crash mid-run.
+        if Path(src).is_dir():
+            found = _videos_in_dir(Path(src))
+            if found:
+                video_files.extend(found)
+            else:
+                log_stderr(f'{src}: folder contains no video files — skipped')
+        else:
+            video_files.append(src)
 
     if not video_files:
+        # Exit non-zero so the desktop app surfaces this as an error instead
+        # of "finished, 0 reports" (bit us when nargs='+' filter flags
+        # swallowed the video path — silent success hid the real failure).
+        print('Error: no video files given (check argument order — '
+              'use "--" before file paths if filters are present)',
+              file=sys.stderr)
         parser.print_help()
-        return
+        sys.exit(2)
 
     # Two-stage architecture (user-designed, see BENCHMARKS.md): detection
     # ALWAYS runs closed-set on the fixed scope (people + vehicles) — best
@@ -1134,10 +1585,24 @@ Examples:
     using_optimized = False
 
     if closed_mode:
-        # The export helpers bake YOLOE prompt embeddings — not applicable to
-        # plain YOLO26. PyTorch MPS/CUDA is already ~2x faster than the old
-        # default; CoreML/TensorRT export for YOLO26 is a follow-up.
-        log_stderr('Closed-set mode: using PyTorch runtime (no baked export)')
+        if torch.cuda.is_available():
+            # NVIDIA: one DYNAMIC TensorRT engine per machine — built once
+            # (~10 min, cached forever), covers every imgsz up to 1920 so a
+            # resolution change never triggers a rebuild (user concern).
+            # Field baseline to beat: 17.9 fps @960 on a GTX 1660 Ti.
+            engine = closed_set_trt_engine(model_path, data_dir,
+                                           getattr(args, 'imgsz', None)
+                                           or cfg.get('imgsz', 960),
+                                           json_progress)
+            if engine:
+                model_path = engine
+                using_optimized = True
+            else:
+                log_stderr('Closed-set mode: using PyTorch runtime')
+        else:
+            # macOS/MPS: PyTorch is already the measured-good path; the
+            # CoreML export of YOLO26 stays a follow-up (needs validation).
+            log_stderr('Closed-set mode: using PyTorch runtime (no baked export)')
     elif sys.platform == 'darwin':
         # macOS: CoreML for Neural Engine acceleration
         coreml_path = get_coreml_model_path(model_path)

@@ -1,6 +1,7 @@
 """VisionX HTML Report Generator"""
 
 import html as html_mod
+import json as json_mod
 from pathlib import Path
 
 try:
@@ -17,11 +18,40 @@ def format_timestamp(seconds: float) -> str:
     return f"{h:02d}:{m:02d}:{s:02d}"
 
 
-def generate_report(tracks: dict, output_dir: str, video_name: str, video_path: str) -> str:
-    """Generate standalone HTML report with embedded thumbnails"""
+def generate_report(tracks: dict, output_dir: str, video_name: str, video_path: str,
+                    video_paths: dict | None = None) -> str:
+    """Generate standalone HTML report with embedded thumbnails.
+
+    video_paths: optional {interval filename -> absolute video path} so a
+    COMBINED report (multiple source videos) can play each interval from the
+    right file; defaults to the single video_path for per-video reports."""
 
     output_path = Path(output_dir)
     output_path.mkdir(parents=True, exist_ok=True)
+
+    # file:// URIs for the in-report clip player (▶ per interval)
+    def _uri(p):
+        try:
+            return Path(p).resolve().as_uri()
+        except Exception:  # noqa: BLE001
+            return ''
+    uri_map = {}
+    if video_paths:
+        uri_map = {name: _uri(p) for name, p in video_paths.items()}
+    default_uri = _uri(video_path) if video_path else ''
+
+    # Playback overlay payload: per-track downsampled boxes (+ relative
+    # plate box) so the clip player can draw the vehicle & plate during
+    # replay — the live-preview experience, but for ONE object.
+    playback_map = {}
+    for track_id, track in tracks.items():
+        pb = track.get('playback')
+        if pb and pb.get('boxes'):
+            entry = {'fps': pb['fps'], 'boxes': pb['boxes']}
+            rel = (track.get('plate') or {}).get('rel_box')
+            if rel:
+                entry['plate'] = [round(float(v), 4) for v in rel]
+            playback_map[str(track_id)] = entry
 
     # Generate detection cards HTML
     cards_html = []
@@ -55,15 +85,29 @@ def generate_report(tracks: dict, output_dir: str, video_name: str, video_path: 
         for iv in intervals[:8]:
             s_ts, e_ts = format_timestamp(iv['start']), format_timestamp(iv['end'])
             file_prefix = f"{html_mod.escape(str(iv['file']))} @ " if iv.get('file') else ''
+            play_uri = uri_map.get(iv.get('file'), default_uri)
+            play_btn = ''
+            if play_uri:
+                # In-place clip replay (user request: research without
+                # copy-pasting timestamps into a player). 2s lead-in.
+                play_btn = (f'<span class="playbtn" '
+                            f'onclick="openClip(\'{play_uri}\', '
+                            f'{max(0.0, iv["start"] - 2):.1f}, {iv["end"] + 2:.1f}, '
+                            f'\'{track_id}\')" '
+                            f'title="Αναπαραγωγή αποσπάσματος με πλαίσια">&#9654;</span>')
             interval_rows.append(
                 f'<span class="ts" onclick="copyTimestamp(\'{s_ts}\')" '
                 f'title="Click to copy start timestamp">'
-                f'{file_prefix}{s_ts} &ndash; {e_ts}</span>')
+                f'{file_prefix}{s_ts} &ndash; {e_ts}</span>{play_btn}')
         if len(intervals) > 8:
             interval_rows.append(f'<span class="ts-more">+{len(intervals) - 8} more intervals</span>')
 
         # Badges: parked/static objects and stitched (merged) identities.
         badges = ''
+        if track.get('host_vehicle'):
+            badges += ('<span class="badge host" title="Το καπό του οχήματος '
+                       'που φέρει την κάμερα (dashcam) — όχι ξεχωριστό '
+                       'όχημα">ΟΧΗΜΑ ΛΗΨΗΣ</span>')
         if track.get('static'):
             badges += '<span class="badge parked" title="Stationary for its whole presence">PARKED</span>'
         merged_n = len(track.get('merged_from', []) or [])
@@ -297,6 +341,7 @@ def generate_report(tracks: dict, output_dir: str, video_name: str, video_path: 
             padding: 2px 6px; margin-left: 6px; letter-spacing: 0.5px;
         }}
         .badge.parked {{ background: #0f3460; color: #7dd3fc; }}
+        .badge.host {{ background: #4b5563; color: #e5e7eb; }}
         .badge.merged {{ background: #14532d; color: #86efac; }}
         .ts-more {{ color: #888; font-size: 0.85em; padding: 2px 10px; }}
         .platechip {{
@@ -312,6 +357,34 @@ def generate_report(tracks: dict, output_dir: str, video_name: str, video_path: 
         }}
         .platechip.uncertain:hover {{ background: #3a2d1a; }}
         .plate-alts {{ color: #fbbf24; font-size: 0.78em; margin: 0 0 4px; }}
+        .lightbox-nav {{
+            position: fixed; top: 50%; transform: translateY(-50%);
+            font-size: 42px; color: #fff; cursor: pointer; user-select: none;
+            padding: 18px 14px; background: rgba(0,0,0,0.35); border-radius: 10px;
+            z-index: 1002;
+        }}
+        .lightbox-nav:hover {{ background: rgba(0,0,0,0.6); }}
+        .lightbox-nav.prev {{ left: 14px; }}
+        .lightbox-nav.next {{ right: 14px; }}
+        .lightbox-veh {{
+            position: fixed; top: 14px; left: 50%; transform: translateX(-50%);
+            display: flex; gap: 10px; z-index: 1002;
+        }}
+        .lightbox-veh span {{
+            cursor: pointer; color: #fff; background: rgba(0,0,0,0.45);
+            border: 1px solid rgba(255,255,255,0.25); border-radius: 8px;
+            padding: 6px 14px; font-size: 14px; user-select: none;
+        }}
+        .lightbox-veh span:hover {{ background: rgba(0,0,0,0.7); }}
+        .playbtn {{
+            display: inline-block; cursor: pointer; color: #4ade80;
+            background: rgba(74, 222, 128, 0.12); border: 1px solid rgba(74, 222, 128, 0.4);
+            border-radius: 6px; padding: 1px 8px; margin-left: 6px; font-size: 0.85em;
+        }}
+        .playbtn:hover {{ background: rgba(74, 222, 128, 0.25); }}
+        #clip-wrap {{ position: relative; display: inline-block; }}
+        #clip-video {{ max-width: 92vw; max-height: 80vh; border-radius: 8px; display: block; }}
+        #clip-canvas {{ position: absolute; left: 0; top: 0; pointer-events: none; }}
         .reapp {{
             display: inline-block; font-size: 0.8em; margin: 2px 0 4px;
             padding: 3px 8px; border-radius: 8px;
@@ -482,9 +555,24 @@ def generate_report(tracks: dict, output_dir: str, video_name: str, video_path: 
 
     <div class="toast" id="toast">Copied to clipboard!</div>
 
+    <div class="lightbox" id="clipbox" onclick="closeClip()">
+        <span class="lightbox-close">&times;</span>
+        <div id="clip-wrap" onclick="event.stopPropagation()">
+            <video id="clip-video" controls></video>
+            <canvas id="clip-canvas"></canvas>
+        </div>
+        <div class="lightbox-title" id="clip-note"></div>
+    </div>
+
     <div class="lightbox" id="lightbox" onclick="closeLightbox()">
         <span class="lightbox-close">&times;</span>
+        <span class="lightbox-nav prev" onclick="lbStep(event, -1)" title="Προηγούμενο στιγμιότυπο ΙΔΙΟΥ αντικειμένου (←)">&#10094;</span>
         <img id="lightbox-img" src="" alt="" onclick="toggleLightboxView(event)">
+        <span class="lightbox-nav next" onclick="lbStep(event, 1)" title="Επόμενο στιγμιότυπο ΙΔΙΟΥ αντικειμένου (→)">&#10095;</span>
+        <div class="lightbox-veh">
+            <span onclick="lbVehicle(event, -1)" title="Προηγούμενο αντικείμενο (↑)">&#9198; προηγ. αντικείμενο</span>
+            <span onclick="lbVehicle(event, 1)" title="Επόμενο αντικείμενο (↓)">επόμ. αντικείμενο &#9197;</span>
+        </div>
         <div class="lightbox-title" id="lightbox-title"></div>
     </div>
 
@@ -496,6 +584,55 @@ def generate_report(tracks: dict, output_dir: str, video_name: str, video_path: 
                 setTimeout(() => toast.classList.remove('show'), 2000);
             }});
         }}
+
+        // Gallery navigation, two levels (user-designed):
+        //   ← / →  (και τα πλαϊνά κουμπιά)  = snapshots of the SAME object
+        //   ↑ / ↓  (και τα κουμπιά ⏮ ⏭)      = previous / next OBJECT
+        // Title always shows position: "CAR #4 — στιγμιότυπο 2/4 · 3/9".
+        const GROUPS = [];
+        document.querySelectorAll('.card').forEach((card) => {{
+            const imgs = Array.from(card.querySelectorAll('img.thumbnail, img.mini, img.face'));
+            if (!imgs.length) return;
+            const title = card.querySelector('.title')?.textContent?.trim() || '';
+            GROUPS.push({{ title, imgs }});
+            imgs.forEach((el, i) => {{
+                const g = GROUPS.length - 1;
+                el.addEventListener('click', (ev) => {{
+                    ev.stopPropagation();
+                    lbOpenAt(g, i);
+                }});
+            }});
+        }});
+        let lbG = -1, lbI = -1;
+
+        function lbOpenAt(g, i) {{
+            if (!GROUPS.length) return;
+            lbG = ((g % GROUPS.length) + GROUPS.length) % GROUPS.length;
+            const items = GROUPS[lbG].imgs;
+            lbI = ((i % items.length) + items.length) % items.length;
+            const el = items[lbI];
+            openLightbox(el.src,
+                `${{GROUPS[lbG].title}} — στιγμιότυπο ${{lbI + 1}}/${{items.length}} · ${{lbG + 1}}/${{GROUPS.length}}`,
+                el.dataset.ctx);
+        }}
+
+        function lbStep(e, d) {{      // within the same object
+            if (e) e.stopPropagation();
+            if (lbG >= 0) lbOpenAt(lbG, lbI + d);
+        }}
+
+        function lbVehicle(e, d) {{   // jump objects, land on first snapshot
+            if (e) e.stopPropagation();
+            if (lbG >= 0) lbOpenAt(lbG + d, 0);
+        }}
+
+        document.addEventListener('keydown', (e) => {{
+            if (!document.getElementById('lightbox').classList.contains('active')) return;
+            if (e.key === 'ArrowLeft') {{ e.preventDefault(); lbStep(null, -1); }}
+            if (e.key === 'ArrowRight') {{ e.preventDefault(); lbStep(null, 1); }}
+            if (e.key === 'ArrowUp') {{ e.preventDefault(); lbVehicle(null, -1); }}
+            if (e.key === 'ArrowDown') {{ e.preventDefault(); lbVehicle(null, 1); }}
+        }});
 
         // Lightbox with scene context: when a snapshot has a context frame
         // (full scene, red box on the object), open on the SCENE first so
@@ -529,6 +666,77 @@ def generate_report(tracks: dict, output_dir: str, video_name: str, video_path: 
             lbShowingCtx = !lbShowingCtx;
             lbRender();
         }}
+
+        const PLAYBACK = {json_mod.dumps(playback_map)};
+        let clipEnd = 0, clipTrack = null, clipAnim = 0;
+
+        function drawClipOverlay() {{
+            const v = document.getElementById('clip-video');
+            const c = document.getElementById('clip-canvas');
+            clipAnim = requestAnimationFrame(drawClipOverlay);
+            if (!clipTrack || !v.videoWidth || !v.clientWidth) return;
+            if (c.width !== v.clientWidth) c.width = v.clientWidth;
+            if (c.height !== v.clientHeight) c.height = v.clientHeight;
+            const g = c.getContext('2d');
+            g.clearRect(0, 0, c.width, c.height);
+            const B = clipTrack.boxes;
+            const f = v.currentTime * clipTrack.fps;
+            if (f < B[0][0] - 8 || f > B[B.length - 1][0] + 8) return;
+            let lo = 0, hi = B.length - 1;
+            while (lo < hi) {{ const m = (lo + hi) >> 1; if (B[m][0] < f) lo = m + 1; else hi = m; }}
+            const j = Math.max(1, lo);
+            const b1 = B[j - 1], b2 = B[Math.min(j, B.length - 1)];
+            const t = b2[0] > b1[0] ? Math.min(1, Math.max(0, (f - b1[0]) / (b2[0] - b1[0]))) : 0;
+            const L = (a, b) => a + (b - a) * t;
+            const sx = c.width / v.videoWidth, sy = c.height / v.videoHeight;
+            const x1 = L(b1[1], b2[1]) * sx, y1 = L(b1[2], b2[2]) * sy;
+            const x2 = L(b1[3], b2[3]) * sx, y2 = L(b1[4], b2[4]) * sy;
+            g.lineWidth = 2;
+            g.strokeStyle = '#4ade80';
+            g.strokeRect(x1, y1, x2 - x1, y2 - y1);
+            if (clipTrack.plate) {{
+                const [rx, ry, rw, rh] = clipTrack.plate;
+                g.strokeStyle = '#ffd200';
+                g.strokeRect(x1 + rx * (x2 - x1), y1 + ry * (y2 - y1),
+                             rw * (x2 - x1), rh * (y2 - y1));
+            }}
+        }}
+
+        function openClip(uri, start, end, tid) {{
+            const box = document.getElementById('clipbox');
+            const v = document.getElementById('clip-video');
+            const note = document.getElementById('clip-note');
+            clipEnd = end;
+            note.textContent = 'Απόσπασμα ' + start.toFixed(0) + 's – ' + end.toFixed(0) + 's';
+            v.onerror = () => {{
+                const dav = /\\.(dav|h264|h265)([#?]|$)/i.test(uri);
+                note.textContent = dav
+                    ? 'Μη υποστηριζόμενο format βίντεο (.dav) — αντιγράψτε το '
+                      + 'timestamp και ανοίξτε το αρχείο σε VLC (Cmd/Ctrl+T).'
+                    : 'Δεν ήταν δυνατή η αναπαραγωγή εδώ — πατήστε «Άνοιγμα '
+                      + 'στον Browser» για πλήρη λειτουργία, ή χρησιμοποιήστε '
+                      + 'το timestamp σε VLC.';
+            }};
+            clipTrack = (tid !== undefined && PLAYBACK[String(tid)]) || null;
+            v.src = uri + '#t=' + start + ',' + end;
+            box.classList.add('active');
+            cancelAnimationFrame(clipAnim);
+            clipAnim = requestAnimationFrame(drawClipOverlay);
+            v.play().catch(() => {{}});
+        }}
+        function closeClip() {{
+            const v = document.getElementById('clip-video');
+            cancelAnimationFrame(clipAnim);
+            clipTrack = null;
+            v.pause();
+            v.removeAttribute('src');
+            v.load();
+            document.getElementById('clipbox').classList.remove('active');
+        }}
+        // Stop at the interval's end (media fragments alone don't always)
+        document.getElementById('clip-video').addEventListener('timeupdate', function () {{
+            if (clipEnd && this.currentTime >= clipEnd) this.pause();
+        }});
 
         function closeLightbox() {{
             document.getElementById('lightbox').classList.remove('active');

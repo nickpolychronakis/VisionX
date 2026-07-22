@@ -68,6 +68,7 @@ class TrackCollector:
         t['_pos_sumsq'][0] += cx * cx
         t['_pos_sumsq'][1] += cy * cy
         t['_max_diag'] = max(t['_max_diag'], diag)
+        t['_frame_wh'] = (w, h)
         if frame_idx is not None:
             t['_boxes'].append((int(frame_idx), x1, y1, x2, y2))
 
@@ -114,9 +115,13 @@ class TrackCollector:
                 'jpeg': jpeg.tobytes(), 'box': (x1, y1, x2, y2),
                 'context': context}
         # Temporal diversity: K snapshots must not be K consecutive frames.
-        # A new candidate within 0.7s of an existing one REPLACES it (if
-        # better) instead of crowding out other moments of the track.
-        near = next((s for s in snaps if abs(s['ts'] - timestamp) < 0.7
+        # ADAPTIVE window (user feedback: short tracks ended up with ONE
+        # snapshot): the spacing requirement scales with the track's life so
+        # far — a 2s pass still yields several distinct moments, while long
+        # tracks keep the 0.7s spread.
+        lifetime = timestamp - t['first_seen']
+        window = max(0.15, min(0.7, lifetime / (self.max_snapshots + 1)))
+        near = next((s for s in snaps if abs(s['ts'] - timestamp) < window
                      and s.get('file') == source_name), None)
         if near is not None:
             if proxy > near['score']:
@@ -154,6 +159,22 @@ class TrackCollector:
                 'start': t['first_seen'], 'end': t['last_seen'],
                 'file': t.get('first_seen_file'),
             }]
+            # Host-vehicle signature (dashcam footage): the recording car
+            # detects its OWN hood as a "car" — a wide box glued to the
+            # bottom edge, in the lower half, across many frames. Flagged
+            # (and excluded from the live preview) but never hidden: the
+            # report keeps the card with a badge — annotate, do not hide.
+            bx = t.get('_boxes') or []
+            fw, fh = t.get('_frame_wh', (0, 0))
+            if bx and fw and t['frame_count'] >= 10:
+                mw = sum(b[3] - b[1] for b in bx) / len(bx)
+                my1 = sum(b[2] for b in bx) / len(bx)
+                my2 = sum(b[4] for b in bx) / len(bx)
+                t['host_vehicle'] = bool(my2 >= 0.96 * fh
+                                         and my1 >= 0.45 * fh
+                                         and mw >= 0.35 * fw)
+            else:
+                t['host_vehicle'] = False
             for k in ('_pos_sum', '_pos_sumsq'):
                 t.pop(k, None)
         return self.tracks
@@ -172,6 +193,17 @@ def prepare_for_report(tracks: dict) -> dict:
     Keeps the legacy 'thumbnail' field (best snapshot) so report code and
     older consumers keep working."""
     for t in tracks.values():
+        # Playback overlay: downsampled per-frame boxes (full-frame pixel
+        # coords) so the report's clip player can draw the vehicle box —
+        # and its plate — during replay, like the live preview but for one
+        # object. ≤300 points ≈ 3KB per track.
+        boxes = t.get('_boxes') or []
+        if boxes:
+            step = max(1, len(boxes) // 300)
+            t['playback'] = {
+                'fps': round(float(t.get('_video_fps') or 25.0), 3),
+                'boxes': [[int(v) for v in b] for b in boxes[::step]],
+            }
         snaps = t.get('snapshots', [])
         t['snapshots_b64'] = [base64.b64encode(s['jpeg']).decode('utf-8')
                               for s in snaps]
@@ -183,6 +215,7 @@ def prepare_for_report(tracks: dict) -> dict:
             if s.get('context') else ''
             for s in snaps]
         t['thumbnail'] = t['snapshots_b64'][0] if t['snapshots_b64'] else None
-        for k in ('snapshots', '_max_diag', '_emb_vpe', '_emb_hist', '_boxes'):
+        for k in ('snapshots', '_max_diag', '_emb_vpe', '_emb_hist', '_boxes',
+                  '_video_fps', '_frame_wh'):
             t.pop(k, None)
     return tracks

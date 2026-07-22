@@ -60,6 +60,26 @@ def generate(out_dir, result, imgs, panels, meta):
     best = (top_gr or top_free)
     region = result.get('region_hint')
 
+    # Readability verdict banner (assess_readability in plate.py): a fully
+    # saturated / tiny plate yields empty OCR reads across the board — the
+    # ranked lists below are then statistical noise, and the report must say
+    # so LOUDLY instead of dressing noise up as candidates (field case).
+    readability = result.get('readability', 'ok')
+    note = result.get('readability_note', '')
+    if readability == 'none':
+        warn_html = ('<div class="unreadable">🛑 <b>ΜΗ ΑΝΑΓΝΩΣΙΜΗ ΠΙΝΑΚΙΔΑ.</b> '
+                     f'{note}. Οι παρακάτω λίστες υποψηφίων είναι '
+                     '<b>στατιστικός θόρυβος</b> και ΔΕΝ πρέπει να '
+                     'χρησιμοποιηθούν για αναζήτηση σε βάση δεδομένων. '
+                     'Δοκιμάστε τμήμα του βίντεο όπου η πινακίδα φαίνεται '
+                     'μεγαλύτερη ή χωρίς κορεσμό (π.χ. χωρίς άμεσο φως '
+                     'προβολέων/IR).</div>')
+    elif readability == 'low':
+        warn_html = (f'<div class="lowread">⚠️ <b>Χαμηλή αξιοπιστία.</b> '
+                     f'{note}.</div>')
+    else:
+        warn_html = ''
+
     img_html = ''
     if imgs.get('fused_large') is not None:
         img_html += (f'<figure><img src="{_b64(imgs["fused_large"])}">'
@@ -105,6 +125,10 @@ def generate(out_dir, result, imgs, panels, meta):
  h4 {{ margin: 8px 0; }}
  .disclaimer {{ background:#3a2b12; border:1px solid #7a5a1e; border-radius:8px;
         padding:10px 14px; margin:14px 0; color:#ffd75e; }}
+ .unreadable {{ background:#3a1214; border:2px solid #b3283a; border-radius:8px;
+        padding:14px 16px; margin:14px 0; color:#ff9aa5; font-size:16px; }}
+ .lowread {{ background:#33270f; border:1px solid #a97b1e; border-radius:8px;
+        padding:10px 14px; margin:14px 0; color:#ffc95e; }}
  .meta span {{ display:inline-block; background:#20242b; border-radius:6px;
         padding:3px 10px; margin:2px 6px 2px 0; }}
  table.cands {{ border-collapse: collapse; width: 100%; max-width: 560px; }}
@@ -138,6 +162,7 @@ def generate(out_dir, result, imgs, panels, meta):
 </style></head><body>
 
 <h1>Ανάλυση πινακίδας — {Path(result.get('video', '')).name}</h1>
+{warn_html}
 <div class="disclaimer">⚠️ Λίστα ΠΙΘΑΝΩΝ πινακίδων για διερευνητική αναζήτηση σε βάση
 δεδομένων — ΔΕΝ αποτελεί αποδεικτικό/δικαστικό τεκμήριο. Τα σκορ είναι σχετική
 κατάταξη, όχι βαθμονομημένες πιθανότητες.</div>

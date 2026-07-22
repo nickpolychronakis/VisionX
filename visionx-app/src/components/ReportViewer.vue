@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { ref, computed, watch } from "vue";
-import { invoke } from "@tauri-apps/api/core";
+import { invoke, convertFileSrc } from "@tauri-apps/api/core";
 
 const props = defineProps<{
   reports: string[];
@@ -23,7 +23,14 @@ watch(selected, async (newPath) => {
     loadingPreview.value = true;
     try {
       const content = await invoke<string>('get_report_content', { path: newPath });
-      reportContent.value = content;
+      // The report's clip player references source videos as file:// URIs
+      // (they work when the report opens in a browser). Inside our srcdoc
+      // iframe WKWebView refuses file:// loads, so rewrite them to the
+      // Tauri asset protocol — the video then streams with range support.
+      reportContent.value = content.replace(
+        /file:\/\/\/[^'"\s]+/g,
+        (m) => convertFileSrc(decodeURIComponent(m.slice("file://".length))),
+      );
     } catch (e) {
       console.error("Failed to load report:", e);
       reportContent.value = "";

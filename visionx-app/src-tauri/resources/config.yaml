@@ -15,3 +15,20 @@ half: false
 imgsz: 640
 vid_stride: 1
 show: false
+
+# Offline tracklet stitching: re-joins fragmented tracks of the same object
+# so it appears ONCE in the report. Threshold calibrated on real footage
+# (see stitch.py) — raise it if two different objects ever get merged.
+stitch: true
+stitch_threshold: 0.88
+stitch_embed_model: yoloe-26n-seg.pt
+# Best snapshots kept per object for the report gallery
+snapshots: 4
+
+# Automatic plate reading on vehicle tracks (candidates for DB search, shown
+# as a chip on each vehicle card; the interactive plate.py stays the
+# deep-analysis tool)
+plates: true
+
+# Clearest face shot(s) per person track — extraction only, NO recognition
+faces: true

@@ -42,6 +42,7 @@ class PlateReader:
         or None when no plate was detected in any crop (motorcycles seen from
         the front, distant vehicles etc. — absence is a normal outcome)."""
         plates = []  # (tight_crop, det_conf)
+        rels = []    # plate box relative to its vehicle crop [rx, ry, rw, rh]
         for crop in crops:
             if crop is None or crop.size == 0:
                 continue
@@ -50,6 +51,14 @@ class PlateReader:
                 continue
             d = max(dets, key=lambda x: float(x.confidence))
             bb = d.bounding_box
+            # Same geometry sanity as the live preview: timestamp/logo bars
+            # inside a vehicle crop are NOT plates (span most of the width).
+            pw, ph = float(bb.x2 - bb.x1), float(bb.y2 - bb.y1)
+            if ph <= 0 or pw > 0.6 * crop.shape[1]                     or not (1.5 <= pw / ph <= 8.0):
+                continue
+            ch2, cw2 = crop.shape[:2]
+            rels.append([float(bb.x1) / cw2, float(bb.y1) / ch2,
+                         pw / cw2, ph / ch2])
             tight = crop[max(0, int(bb.y1)):int(bb.y2),
                          max(0, int(bb.x1)):int(bb.x2)]
             # Below ~40px width there are no readable characters — feeding
@@ -58,6 +67,24 @@ class PlateReader:
                 plates.append((tight, float(d.confidence)))
         if not plates:
             return None
+
+        # Tilt-corrected renderings VOTE ALONGSIDE the originals (user
+        # request: the auto pass must analyse the true plate outline like
+        # the interactive tool). Same rules as plate.py: quad = orientation
+        # only (never crop bounds), applied only on significant tilt, and
+        # never replacing — per-position voting arbitrates.
+        levelled = []
+        for img, w in plates:
+            try:
+                quad, _conf = P.estimate_quad(img, None)
+                if quad is None or P._quad_tilt_deg(quad) < P.RECTIFY_MIN_TILT:
+                    continue
+                lv = P.level_by_quad(img, quad)
+                if lv is not None:
+                    levelled.append((lv, w))
+            except Exception:  # noqa: BLE001 — optional refinement
+                continue
+        plates.extend(levelled)
 
         # Per-position weighted vote across crops × ensemble models — the
         # exact scheme plate.py uses (weights = plate detector confidence).
@@ -110,4 +137,8 @@ class PlateReader:
             # renders as uncertain with alternatives up front; genuinely
             # close-up plates (150px+) earn the confident style.
             'low_conf': plate_px < 90 or len(plates) < 3 or best['score'] < 0.5,
+            # Median relative plate position inside the vehicle box — lets
+            # the report draw the yellow plate rectangle during replay.
+            'rel_box': ([float(np.median([r[i] for r in rels]))
+                         for i in range(4)] if rels else None),
         }

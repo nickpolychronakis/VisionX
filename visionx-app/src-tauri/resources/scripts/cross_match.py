@@ -27,6 +27,11 @@ import stitch as stitch_mod
 # 0.88 because viewpoint/white-balance changes push same-object similarity
 # down and different-object similarity up. Field-calibrate over time.
 APPEARANCE_XCAM_THRESHOLD = 0.92
+# Review tier (user workflow): pairs BELOW the auto-match gates but strong
+# enough to deserve a human look — shown as "πιθανές συσχετίσεις" with an
+# accept toggle, never auto-merged.
+APPEARANCE_UNCERTAIN = 0.85
+PLATE_UNCERTAIN = 0.60
 # With a plate agreement, appearance only needs to not-contradict.
 APPEARANCE_WITH_PLATE_THRESHOLD = 0.80
 PLATE_STRONG = 0.85
@@ -88,10 +93,68 @@ def pair_score(ta: dict, tb: dict) -> tuple | None:
     return None
 
 
-def match_videos(per_video: dict) -> list:
+def find_reappearances(tracks: dict) -> list:
+    """Same-video re-identification: pairs of tracks (same class) whose time
+    intervals are DISJOINT — one left the scene, the other appeared later —
+    but whose evidence says they may be the same physical object (a vehicle
+    that leaves and returns, a person walking back into frame).
+
+    Deliberately an ANNOTATION, never a merge: identity across a long gap is
+    a human call (evidentiary caution), so the report links the two cards and
+    the investigator judges. Evidence tiers mirror cross-video matching:
+    plate-candidate agreement is strong, appearance alone is weak.
+
+    Returns [{'a': earlier_tid, 'b': later_tid, 'gap': sec, 'score', 'evidence'}]
+    sorted best-first.
+    """
+    pairs = []
+    for (ia, ta), (ib, tb) in itertools.combinations(list(tracks.items()), 2):
+        if ta['class'] != tb['class']:
+            continue
+        # Real absence gate: overlap means two different objects (the tracker
+        # saw both at once); gaps under ~3s are ordinary tracking dropouts —
+        # stitching's territory — not a genuine departure+return.
+        gap = (max(ta['first_seen'], tb['first_seen'])
+               - min(ta['last_seen'], tb['last_seen']))
+        if gap < 3.0:
+            continue
+        # Two static tracks don't "reappear" — a parked car split in two is
+        # stitching's job (same-spot merge), not a departure.
+        if ta.get('static') and tb.get('static'):
+            continue
+        scored = pair_score(ta, tb)
+        if scored is None:
+            continue
+        score, evidence = scored
+        a, b = (ia, ib) if ta['first_seen'] <= tb['first_seen'] else (ib, ia)
+        pairs.append({'a': a, 'b': b, 'gap': round(gap, 1),
+                      'score': score, 'evidence': evidence})
+    pairs.sort(key=lambda p: -p['score'])
+    return pairs
+
+
+def pair_score_uncertain(ta: dict, tb: dict):
+    """Sub-threshold pair evidence for HUMAN review. Returns (score,
+    evidence) for pairs in the uncertain band, else None. Kept separate from
+    pair_score so the auto-merge gates stay untouched."""
+    if ta['class'] != tb['class']:
+        return None
+    app = stitch_mod.similarity(ta, tb)
+    plate = plate_match_score(ta.get('plate'), tb.get('plate'))
+    if plate is not None and PLATE_UNCERTAIN <= plate < PLATE_STRONG:
+        return (0.4 * plate, 'plate (αβέβαιη)')
+    if APPEARANCE_UNCERTAIN <= app < APPEARANCE_XCAM_THRESHOLD:
+        return (0.3 * app, 'εμφάνιση (αβέβαιη)')
+    return None
+
+
+def match_videos(per_video: dict, with_uncertain: bool = False):
     """per_video: {video_name: tracks_dict (pre-report, with _emb_* intact)}.
 
-    Returns groups: [{'members': [(video, track_id)], 'score', 'evidence'}].
+    Returns groups: [{'members': [(video, track_id)], 'score', 'evidence'}] —
+    or (groups, uncertain_pairs) when with_uncertain=True, where
+    uncertain_pairs are sub-threshold candidate pairs for human review
+    (members not already in the same confident group).
     Greedy best-pair-first with union-find; a group never contains two
     objects from the SAME video (they were already stitched there — two
     same-video tracks are two different physical objects by construction).
@@ -153,7 +216,24 @@ def match_videos(per_video: dict) -> list:
             'score': round(score_of.get(r, 0.0), 3),
         })
     out.sort(key=lambda g: -g['score'])
-    return out
+    if not with_uncertain:
+        return out
+
+    uncertain = []
+    for (va, ida, ta), (vb, idb, tb) in itertools.combinations(items, 2):
+        if va == vb:
+            continue
+        if find(idx[(va, ida)]) == find(idx[(vb, idb)]):
+            continue  # already auto-matched confidently
+        scored = pair_score_uncertain(ta, tb)
+        if scored:
+            uncertain.append({
+                'members': sorted([(va, ida), (vb, idb)]),
+                'evidence': scored[1],
+                'score': round(scored[0], 3),
+            })
+    uncertain.sort(key=lambda g: -g['score'])
+    return out, uncertain[:40]  # cap: a wall of weak pairs helps nobody
 
 
 def combined_plate(group_tracks: list, reader) -> dict | None:
