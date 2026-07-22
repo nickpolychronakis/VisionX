@@ -816,19 +816,23 @@ pub async fn run_setup(
         .resource_dir()
         .map_err(|e| format!("Resource dir error: {}", e))?;
 
-    // plate.py + plate_report.py bundled since v0.7.0: CLI-only for now (GUI
-    // integration pending), but shipping them keeps scripts/ in sync with the
-    // repo root; plate_report.py is imported by plate.py for the HTML report.
-    for script in ["vision.py", "report.py", "plate.py", "plate_report.py",
-                   "tracking.py", "stitch.py", "plate_core.py", "face_shots.py",
-                   "cross_match.py", "match_report.py", "attributes.py",
-                   "prompt_filter.py"] {
-        let src = resource_dir.join("scripts").join(script);
-        let dst = scripts_dir.join(script);
-        if src.exists() {
-            std::fs::copy(&src, &dst)
-                .map_err(|e| format!("Failed to copy {}: {}", script, e))?;
-            logger.info(&format!("Copied {} to scripts/", script));
+    // Copy EVERY bundled *.py by globbing the resources dir — the script
+    // list lives in ONE place (build.rs SCRIPTS syncs repo root ->
+    // resources); a hardcoded copy of it here silently skipped new scripts
+    // twice in the field (the DRY audit's "4 script lists" finding).
+    let bundled_scripts = resource_dir.join("scripts");
+    if bundled_scripts.is_dir() {
+        for entry in std::fs::read_dir(&bundled_scripts)
+            .map_err(|e| format!("Cannot read bundled scripts: {}", e))?
+        {
+            let src = entry.map_err(|e| e.to_string())?.path();
+            let is_py = src.extension().and_then(|x| x.to_str()) == Some("py");
+            if src.is_file() && is_py {
+                let name = src.file_name().unwrap().to_string_lossy().to_string();
+                std::fs::copy(&src, scripts_dir.join(&name))
+                    .map_err(|e| format!("Failed to copy {}: {}", name, e))?;
+                logger.info(&format!("Copied {} to scripts/", name));
+            }
         }
     }
 

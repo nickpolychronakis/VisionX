@@ -18,19 +18,10 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Place resource files
-        shell: bash
-        run: |
-          mkdir -p visionx-app/src-tauri/resources/scripts
-          # Copy EVERY script tauri.conf.json lists as a resource — a partial
-          # list here fails the bundle when the conf grows (bit us at 0.8.0:
-          # only 2 of 12 scripts were copied).
-          for f in vision report plate plate_report tracking stitch \
-                   plate_core face_shots cross_match match_report \
-                   attributes prompt_filter; do
-            cp "$f.py" visionx-app/src-tauri/resources/scripts/
-          done
-          cp config.yaml tracker.yaml visionx-app/src-tauri/resources/
+ # NOTE: no manual resource-copy step — src-tauri/build.rs syncs every
+      # bundled script/config from the repo root at build time (single
+      # source of truth; a stale manual list here shipped a 2-file bundle
+      # once and rolled back deployed scripts another time).
 
       - name: Install pnpm
         uses: pnpm/action-setup@v4
