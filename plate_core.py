@@ -20,16 +20,9 @@ class PlateReader:
 
     def __init__(self, detector_model: str = P.DEFAULT_DETECTOR_MODEL,
                  ocr_models: str = P.DEFAULT_OCR_MODELS):
-        from open_image_models import LicensePlateDetector
         from fast_plate_ocr import LicensePlateRecognizer
-        # conf 0.15: same permissive gate as the interactive tool — dusk and
-        # small plates score 0.15-0.35 and the voting filters noise anyway.
-        # CPU provider explicitly: the CoreML EP cannot express this model's
-        # zero-detection output (dynamic {-1} shape, 0 elements) and throws
-        # on every empty frame (see plate.py for the field case).
-        self.detector = LicensePlateDetector(detection_model=detector_model,
-                                             conf_thresh=0.15,
-                                             providers=['CPUExecutionProvider'])
+        # Shared factory (providers/conf rationale lives in plate.py — DRY).
+        self.detector = P.make_plate_detector(detector_model)
         self.recognizers = [
             {'name': m.strip(),
              'rec': LicensePlateRecognizer(m.strip(), device='cpu'),
@@ -51,10 +44,10 @@ class PlateReader:
                 continue
             d = max(dets, key=lambda x: float(x.confidence))
             bb = d.bounding_box
-            # Same geometry sanity as the live preview: timestamp/logo bars
-            # inside a vehicle crop are NOT plates (span most of the width).
+            # Shared geometry gate (plate.py) — timestamp/logo bars
+            # are NOT plates; rationale lives with the constants.
             pw, ph = float(bb.x2 - bb.x1), float(bb.y2 - bb.y1)
-            if ph <= 0 or pw > 0.6 * crop.shape[1]                     or not (1.5 <= pw / ph <= 8.0):
+            if not P.plate_geometry_ok(pw, ph, crop.shape[1]):
                 continue
             ch2, cw2 = crop.shape[:2]
             rels.append([float(bb.x1) / cw2, float(bb.y1) / ch2,

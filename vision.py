@@ -20,7 +20,7 @@ from tqdm import tqdm
 from ultralytics import YOLO  # type: ignore[attr-defined]
 from ultralytics.data.utils import IMG_FORMATS, VID_FORMATS
 from report import generate_report
-from tracking import TrackCollector, prepare_for_report
+from tracking import TrackCollector, is_host_geometry, prepare_for_report
 import stitch as stitch_mod
 
 # Add .dav (Dahua DVR format) support - OpenCV can read these
@@ -162,15 +162,14 @@ _PREVIEW_PLATES: dict = {'det': None, 'mod': None, 'failed': False}
 
 
 def _is_host_box(result, i: int) -> bool:
-    """Per-frame version of the host-vehicle signature (see tracking.py):
-    a wide vehicle box glued to the bottom edge of the frame = the
-    recording car detecting its own hood."""
+    """Per-frame host-vehicle check — geometry shared with tracking.py
+    (single definition of the signature constants)."""
     try:
         if int(result.boxes.cls[i]) not in (2, 3, 5, 7):
             return False
         x1, y1, x2, y2 = (float(v) for v in result.boxes.xyxy[i])
         fh, fw = result.orig_img.shape[:2]
-        return y2 >= 0.96 * fh and y1 >= 0.45 * fh and (x2 - x1) >= 0.35 * fw
+        return is_host_geometry(x1, y1, x2, y2, fw, fh)
     except Exception:  # noqa: BLE001
         return False
 
@@ -185,11 +184,11 @@ def draw_plate_quads(annotated: np.ndarray, result) -> None:
         return
     try:
         if _PREVIEW_PLATES['det'] is None:
-            from open_image_models import LicensePlateDetector
             import plate as plate_mod
-            _PREVIEW_PLATES['det'] = LicensePlateDetector(
-                detection_model=plate_mod.DEFAULT_DETECTOR_MODEL,
-                conf_thresh=0.2, providers=['CPUExecutionProvider'])
+            # Shared factory (CPU-provider rationale lives with it — DRY).
+            # conf 0.2: the preview draws instantly, so it prefers fewer
+            # false quads over recall; the analysis keeps its own 0.15.
+            _PREVIEW_PLATES['det'] = plate_mod.make_plate_detector(conf=0.2)
             _PREVIEW_PLATES['mod'] = plate_mod
         det = _PREVIEW_PLATES['det']
         pm = _PREVIEW_PLATES['mod']
