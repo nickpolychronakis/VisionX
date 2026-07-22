@@ -924,51 +924,27 @@ def process_video(source: str, yolo: YOLO, cfg: dict, args, video_index: int = 1
     # regenerate one unified report via --finalize-match. Written BEFORE
     # prepare_for_report strips the raw snapshots the finalize needs.
     if json_progress and any(t.get('reappearance') for t in tracks.values()):
-        try:
-            import pickle
-            vname = source_path.name
-            out_dir2 = args.output or str(source_path.parent)
-            session_pkl = str(Path(out_dir2) / f'{source_path.stem}_review_session.pkl')
-            review_json = str(Path(out_dir2) / f'{source_path.stem}_review.json')
-            copies = {vname: {tid: dict(t) for tid, t in tracks.items()}}
-            with open(session_pkl, 'wb') as f:
-                pickle.dump({'sources': {vname: str(source_path)},
-                             'per_video': copies}, f,
-                            protocol=pickle.HIGHEST_PROTOCOL)
-            seen_pairs = set()
-            uncertain_ui = []
-            for tid, t in tracks.items():
-                for r in t.get('reappearance') or []:
-                    key = tuple(sorted((tid, r['other'])))
-                    if key in seen_pairs:
-                        continue
-                    seen_pairs.add(key)
-                    uncertain_ui.append({
-                        'members': [[vname, key[0]], [vname, key[1]]],
-                        'evidence': r['evidence'] + f' · κενό {r["gap"]:.0f}s',
-                        'score': r['score'],
-                        'combined_plate': None,
-                    })
-            ui = {'videos': {vname: str(source_path)}, 'session': session_pkl,
-                  'groups': [], 'uncertain': uncertain_ui, 'tracks': {vname: {}}}
-            for tid, t in tracks.items():
-                snaps = t.get('snapshots') or []
-                ui['tracks'][vname][str(tid)] = {
-                    'class': t['class'],
-                    'first_seen': round(t['first_seen'], 1),
-                    'last_seen': round(t['last_seen'], 1),
-                    'static': bool(t.get('static')),
-                    'plate': (t.get('plate') or {}).get('plate'),
-                    'color': (t.get('attrs') or {}).get('color'),
-                    'thumb': (base64.b64encode(snaps[0]['jpeg']).decode('ascii')
-                              if snaps else None),
-                }
-            with open(review_json, 'w', encoding='utf-8') as f:
-                json.dump(ui, f, ensure_ascii=False)
-            emit_json('match_review', path=review_json)
-            log_stderr(f'Same-video review session: {review_json}')
-        except Exception as e:  # noqa: BLE001 — review is additive
-            log_stderr(f'Review session write failed ({e})')
+        # Deduplicate the (a, b) / (b, a) mirror annotations into pairs, then
+        # delegate ALL serialization to the shared writer.
+        vname = source_path.name
+        seen_pairs: set = set()
+        uncertain_ui = []
+        for tid, t in tracks.items():
+            for r in t.get('reappearance') or []:
+                key = tuple(sorted((tid, r['other'])))
+                if key in seen_pairs:
+                    continue
+                seen_pairs.add(key)
+                uncertain_ui.append({
+                    'members': [[vname, key[0]], [vname, key[1]]],
+                    'evidence': r['evidence'] + f' · κενό {r["gap"]:.0f}s',
+                    'score': r['score'],
+                })
+        write_review_session({vname: tracks}, {vname: str(source_path)},
+                             args.output or str(source_path.parent),
+                             groups=[], uncertain=uncertain_ui,
+                             prefix=f'{source_path.stem}_review',
+                             json_progress=json_progress)
 
     tracks = prepare_for_report(tracks)
 
@@ -985,6 +961,75 @@ def process_video(source: str, yolo: YOLO, cfg: dict, args, video_index: int = 1
             print(f'  Report: {report_path}')
 
     return report_path, None
+
+
+
+def write_review_session(per_video: dict, sources: dict, out_dir: str,
+                         groups: list, uncertain: list, prefix: str,
+                         json_progress: bool) -> None:
+    """Persist a correlation-review session (the ONE implementation — used
+    by multi-camera match mode and by the single-video re-appearance flow;
+    an earlier copy-paste of this block is exactly what the DRY audit
+    flagged).
+
+    Writes two artifacts to out_dir:
+      {prefix}_session.pkl  — full pre-report tracks (raw snapshot bytes),
+                              shallow-copied HERE so a later
+                              prepare_for_report on the originals cannot
+                              strip what --finalize-match needs;
+      {prefix}_review.json  — light UI payload (one thumbnail per track)
+                              for the review screen.
+    Emits the match_review event so the app opens the review screen.
+    Failures only log: the review flow is additive, never fatal.
+    """
+    session_pkl = str(Path(out_dir) / f'{prefix}_session.pkl')
+    review_json = str(Path(out_dir) / f'{prefix}_review.json')
+
+    def group_ui(g: dict) -> dict:
+        # Normalize both shapes callers produce: cross_match groups carry
+        # (video, tid) tuples + a combined_plate DICT; re-appearance pairs
+        # carry [video, tid] lists + no combined plate.
+        combo = g.get('combined_plate')
+        return {'members': [[v, tid] for v, tid in g['members']],
+                'evidence': g.get('evidence'),
+                'score': g.get('score'),
+                'combined_plate': (combo.get('plate')
+                                   if isinstance(combo, dict) else combo)}
+
+    try:
+        import pickle
+        copies = {v: {tid: dict(t) for tid, t in tracks.items()}
+                  for v, tracks in per_video.items()}
+        with open(session_pkl, 'wb') as f:
+            pickle.dump({'sources': {n: str(p2) for n, p2 in sources.items()},
+                         'per_video': copies}, f,
+                        protocol=pickle.HIGHEST_PROTOCOL)
+        ui = {'videos': {n: str(p2) for n, p2 in sources.items()},
+              'session': session_pkl,
+              'groups': [group_ui(g) for g in groups],
+              'uncertain': [group_ui(g) for g in uncertain],
+              'tracks': {}}
+        for vname, tracks in copies.items():
+            ui['tracks'][vname] = {}
+            for tid, t in tracks.items():
+                snaps = t.get('snapshots') or []
+                ui['tracks'][vname][str(tid)] = {
+                    'class': t['class'],
+                    'first_seen': round(t['first_seen'], 1),
+                    'last_seen': round(t['last_seen'], 1),
+                    'static': bool(t.get('static')),
+                    'plate': (t.get('plate') or {}).get('plate'),
+                    'color': (t.get('attrs') or {}).get('color'),
+                    'thumb': (base64.b64encode(snaps[0]['jpeg']).decode('ascii')
+                              if snaps else None),
+                }
+        with open(review_json, 'w', encoding='utf-8') as f:
+            json.dump(ui, f, ensure_ascii=False)
+        if json_progress:
+            emit_json('match_review', path=review_json)
+        log_stderr(f'Review session: {review_json}')
+    except Exception as e:  # noqa: BLE001 — review is additive, never fatal
+        log_stderr(f'Review session write failed ({e})')
 
 
 def run_finalize_match(args) -> str | None:
@@ -1149,18 +1194,12 @@ def run_match_mode(video_files: list, yolo: YOLO, cfg: dict, args) -> list:
     log_stderr(f'Cross-match: {len(groups)} matched objects across '
                f'{len(video_files)} videos')
 
-    # Shallow-copied track dicts for the review session: prepare_for_report
-    # (below) pops raw snapshots/embeddings from the ORIGINAL dicts — these
-    # copies keep their own key set, so the pickle retains the full data.
-    _session_tracks = {v: {tid: dict(t) for tid, t in tracks.items()}
-                       for v, tracks in per_video.items()}
-
-    def groups_ui(gs):
-        return [{'members': [[v, tid] for v, tid in g['members']],
-                 'evidence': g.get('evidence'),
-                 'score': g.get('score'),
-                 'combined_plate': (g.get('combined_plate') or {}).get('plate')}
-                for g in gs]
+    # Review session FIRST: the shared writer shallow-copies the tracks, so
+    # it must run before prepare_for_report (below) strips raw snapshots.
+    write_review_session(per_video, sources,
+                         args.output or str(Path(video_files[0]).parent),
+                         groups=groups, uncertain=uncertain,
+                         prefix='visionx_match', json_progress=json_progress)
 
     # Reports: per-video first (prepare_for_report encodes the snapshots the
     # match report also embeds), then the combined match report.
@@ -1174,46 +1213,6 @@ def run_match_mode(video_files: list, yolo: YOLO, cfg: dict, args) -> list:
         reports.append(rp)
         if json_progress:
             emit_json('report', path=rp)
-    # Review session (user workflow): the app opens a review screen where
-    # confident matches can be REJECTED and uncertain ones ACCEPTED; the
-    # final decisions regenerate ONE combined report via --finalize-match.
-    # The pickle keeps the full pre-report tracks (raw snapshot bytes) —
-    # written BEFORE prepare_for_report mutates them; the JSON is the light
-    # UI payload (one thumbnail per track).
-    session_pkl = str(Path(output_dir) / 'visionx_match_session.pkl')
-    review_json = str(Path(output_dir) / 'visionx_match_review.json')
-    try:
-        import pickle
-        with open(session_pkl, 'wb') as f:
-            pickle.dump({'sources': sources, 'per_video': _session_tracks},
-                        f, protocol=pickle.HIGHEST_PROTOCOL)
-        ui = {'videos': {n: str(p) for n, p in sources.items()},
-              'session': session_pkl,
-              'tracks': {}, 'groups': groups_ui(groups),
-              'uncertain': groups_ui(uncertain)}
-        for vname, tracks in _session_tracks.items():
-            ui['tracks'][vname] = {}
-            for tid, t in tracks.items():
-                snaps = t.get('snapshots') or []
-                thumb = (base64.b64encode(snaps[0]['jpeg']).decode('ascii')
-                         if snaps else None)
-                ui['tracks'][vname][str(tid)] = {
-                    'class': t['class'],
-                    'first_seen': round(t['first_seen'], 1),
-                    'last_seen': round(t['last_seen'], 1),
-                    'static': bool(t.get('static')),
-                    'plate': (t.get('plate') or {}).get('plate'),
-                    'color': (t.get('attrs') or {}).get('color'),
-                    'thumb': thumb,
-                }
-        with open(review_json, 'w', encoding='utf-8') as f:
-            json.dump(ui, f, ensure_ascii=False)
-        if json_progress:
-            emit_json('match_review', path=review_json)
-        log_stderr(f'Match review session: {review_json}')
-    except Exception as e:  # noqa: BLE001 — review is additive, never fatal
-        log_stderr(f'Match session write failed ({e})')
-
     from match_report import generate_match_report
     mp = generate_match_report(per_video, groups, output_dir,
                                list(per_video.keys()))
