@@ -39,16 +39,18 @@ def generate_match_report(per_video: dict, groups: list, output_dir: str,
     out = Path(output_dir)
     out.mkdir(parents=True, exist_ok=True)
 
-    ev_label = {
-        'plate+appearance': ('ΠΙΝΑΚΙΔΑ + ΕΜΦΑΝΙΣΗ', 'ev-strong'),
-        'plate': ('ΠΙΝΑΚΙΔΑ', 'ev-strong'),
-        'appearance': ('ΜΟΝΟ ΕΜΦΑΝΙΣΗ — χαμηλή βεβαιότητα', 'ev-weak'),
-    }
+    # Shared translation table (cross_match.py) — tier maps to the local
+    # CSS class names.
+    from cross_match import evidence_label_el
+
+    def ev_label_css(evidence):
+        label, tier = evidence_label_el(evidence)
+        return label, ('ev-strong' if tier == 'strong' else 'ev-weak')
 
     grouped_keys = set()
     groups_html = ''
     for gi, g in enumerate(groups, 1):
-        label, ev_cls = ev_label.get(g['evidence'], (g['evidence'], 'ev-weak'))
+        label, ev_cls = ev_label_css(g['evidence'])
         combo = ''
         cp = g.get('combined_plate')
         if cp:

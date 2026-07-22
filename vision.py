@@ -947,10 +947,16 @@ def write_review_session(per_video: dict, sources: dict, out_dir: str,
     def group_ui(g: dict) -> dict:
         # Normalize both shapes callers produce: cross_match groups carry
         # (video, tid) tuples + a combined_plate DICT; re-appearance pairs
-        # carry [video, tid] lists + no combined plate.
+        # carry [video, tid] lists + no combined plate. The Greek evidence
+        # label ships READY-MADE (shared table in cross_match) so the Vue
+        # review screen renders it verbatim instead of translating.
+        from cross_match import evidence_label_el
         combo = g.get('combined_plate')
+        label, tier = evidence_label_el(g.get('evidence'))
         return {'members': [[v, tid] for v, tid in g['members']],
                 'evidence': g.get('evidence'),
+                'evidence_label': label,
+                'evidence_tier': tier,
                 'score': g.get('score'),
                 'combined_plate': (combo.get('plate')
                                    if isinstance(combo, dict) else combo)}

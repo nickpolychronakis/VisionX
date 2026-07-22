@@ -37,6 +37,24 @@ APPEARANCE_WITH_PLATE_THRESHOLD = 0.80
 PLATE_STRONG = 0.85
 
 
+# Greek evidence labels — the ONE translation table for every surface
+# (match report, per-video report re-appearance chips, review-screen JSON).
+# Each entry: (display text, tier) where tier ∈ 'strong' | 'weak' drives the
+# visual treatment (solid vs dashed/low-confidence styling).
+EVIDENCE_LABELS_EL = {
+    'plate+appearance': ('ΠΙΝΑΚΙΔΑ + ΕΜΦΑΝΙΣΗ', 'strong'),
+    'plate': ('ΠΙΝΑΚΙΔΑ', 'strong'),
+    'appearance': ('ΜΟΝΟ ΕΜΦΑΝΙΣΗ — χαμηλή βεβαιότητα', 'weak'),
+}
+
+
+def evidence_label_el(evidence: str | None) -> tuple[str, str]:
+    """(label, tier) for an evidence key; unknown/composited keys (e.g. the
+    re-appearance 'plate (αβέβαιη) · κενό 42s' strings) pass through as-is
+    with the cautious 'weak' tier."""
+    return EVIDENCE_LABELS_EL.get(evidence or '', (evidence or '', 'weak'))
+
+
 def _edit_distance(a: str, b: str) -> int:
     m, n = len(a), len(b)
     dp = list(range(n + 1))

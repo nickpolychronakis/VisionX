@@ -23,6 +23,10 @@ interface TrackInfo {
 interface Group {
   members: [string, number][];
   evidence: string | null;
+  // Ready-made Greek label + tier from python (cross_match.py is the ONE
+  // translation table — the Vue side renders verbatim, never translates).
+  evidence_label: string | null;
+  evidence_tier: "strong" | "weak" | null;
   score: number | null;
   combined_plate: string | null;
 }
@@ -135,12 +139,8 @@ async function finalize() {
           </div>
         </div>
         <div class="evidence">
-          <span class="badge" :class="{ weak: g.evidence === 'appearance' }">{{
-            g.evidence === "appearance"
-              ? "ΜΟΝΟ ΕΜΦΑΝΙΣΗ — χαμηλή βεβαιότητα"
-              : g.evidence?.includes("plate")
-                ? "ΠΙΝΑΚΙΔΑ" + (g.evidence.includes("appearance") ? " + ΕΜΦΑΝΙΣΗ" : "")
-                : g.evidence
+          <span class="badge" :class="{ weak: g.evidence_tier === 'weak' }">{{
+            g.evidence_label ?? g.evidence
           }}</span>
           <span v-if="g.combined_plate" class="plate">Συνδυαστική: {{ g.combined_plate }}</span>
         </div>
@@ -179,7 +179,7 @@ async function finalize() {
           </div>
         </div>
         <div class="evidence">
-          <span class="badge weak">{{ g.evidence }}</span>
+          <span class="badge weak">{{ g.evidence_label ?? g.evidence }}</span>
         </div>
       </div>
 

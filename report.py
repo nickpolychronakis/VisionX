@@ -9,6 +9,12 @@ try:
 except Exception:  # noqa: BLE001 — report must render even without the module
     CSS_COLOR = {}
 
+try:
+    from cross_match import evidence_label_el as _evidence_label
+except Exception:  # noqa: BLE001 — same resilience rule as CSS_COLOR
+    def _evidence_label(ev):
+        return (ev or '', 'weak')
+
 
 def format_timestamp(seconds: float) -> str:
     """Convert seconds to HH:MM:SS format"""
@@ -178,14 +184,12 @@ def generate_report(tracks: dict, output_dir: str, video_name: str, video_path: 
         # Annotation only — merging over a long gap is the investigator's
         # call, never the algorithm's.
         reapp_html = ''
-        _EVIDENCE_EL = {'plate': 'πινακίδα',
-                        'plate+appearance': 'πινακίδα + εμφάνιση',
-                        'appearance': 'μόνο εμφάνιση — χαμηλή βεβαιότητα'}
         for r in track.get('reappearance') or []:
             when = ('νωρίτερα' if r.get('when') == 'earlier' else 'αργότερα')
-            ev = _EVIDENCE_EL.get(r.get('evidence'), r.get('evidence', ''))
-            weak = r.get('evidence') == 'appearance'
-            cls_extra = ' weak' if weak else ''
+            # Shared translation table (cross_match.py) — one wording for
+            # evidence across match report, review screen and these chips.
+            ev, tier = _evidence_label(r.get('evidence'))
+            cls_extra = ' weak' if tier == 'weak' else ''
             reapp_html += (
                 f'<div class="reapp{cls_extra}">&#128257; Πιθανή επανεμφάνιση: '
                 f'ίδιο με #{r["other"]} ({when}, κενό {r.get("gap", 0):.0f}s) '
