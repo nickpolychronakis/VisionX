@@ -707,46 +707,10 @@ def process_video(source: str, yolo: YOLO, cfg: dict, args, video_index: int = 1
             emit_json('status', message=f'Παράβλεψη {source_path.name}: '
                                         f'δεν αναγνωρίζεται ως βίντεο')
         return None, None
-    total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-    fps_metadata = cap.get(cv2.CAP_PROP_FPS)
-
-    # Calculate actual fps (metadata is often wrong for security cameras)
-    frames_to_check = 0
-    pos_sec = 0.0  # stays 0 when not a single frame decodes (bad stream)
-    while frames_to_check < 100:
-        ret, _ = cap.read()
-        if not ret:
-            break
-        frames_to_check += 1
-        pos_sec = cap.get(cv2.CAP_PROP_POS_MSEC) / 1000
-        if pos_sec >= 5:  # Check first 5 seconds
-            break
-
-    if pos_sec > 0 and frames_to_check > 0:
-        fps = frames_to_check / pos_sec
-    else:
-        fps = fps_metadata
-
     cap.release()
-
-    if total_frames <= 0:
-        # DVR containers (Dahua .dav etc.) often report ZERO frames in the
-        # metadata while the stream decodes perfectly (Windows field case:
-        # both XVR .dav files were skipped and the report came out empty).
-        # Count by grab() — demux-only, no decode, orders of magnitude
-        # faster than reading — and only skip when not a single frame grabs.
-        log_stderr(f'{source_path.name}: no frame count in metadata — '
-                   f'counting frames (DVR container)...')
-        if json_progress:
-            emit_json('status', message=f'Καταμέτρηση καρέ ({source_path.name}: '
-                                        f'αρχείο DVR χωρίς μεταδεδομένα)...')
-        probe = cv2.VideoCapture(source)
-        counted = 0
-        while probe.grab():
-            counted += 1
-        probe.release()
-        total_frames = counted
-        log_stderr(f'{source_path.name}: counted {total_frames} frames')
+    # Shared probe (frame count + real fps, incl. the DVR grab-count and
+    # fps fallbacks) — one implementation for every caller.
+    total_frames, fps = get_video_fps(source, json_progress=json_progress)
 
     if total_frames == 0:
         # Video file may be corrupt, empty, or in unsupported format
@@ -754,10 +718,6 @@ def process_video(source: str, yolo: YOLO, cfg: dict, args, video_index: int = 1
         if json_progress:
             emit_json('status', message=f'Παράβλεψη {source_path.name}: δεν μπόρεσε να αναγνωριστεί')
         return None, None
-
-    if not fps or fps <= 0 or fps != fps:  # 0/NaN metadata — common in .dav
-        log_stderr(f'{source_path.name}: no usable fps in metadata — assuming 25')
-        fps = 25.0
 
     # Output directory for YOLO (only if saving video/crops)
     output_dir = args.output or str(source_path.parent)
@@ -1223,30 +1183,56 @@ def run_match_mode(video_files: list, yolo: YOLO, cfg: dict, args) -> list:
     return reports
 
 
-def get_video_fps(source: str) -> tuple[int, float]:
-    """Get total frames and actual fps for a video"""
+def get_video_fps(source: str, json_progress: bool = False) -> tuple[int, float]:
+    """Total frames + ACTUAL fps for a video — the ONE probe implementation
+    (process_video had accumulated a hardened inline copy; the DRY audit
+    merged them). Hardening carried over from field cases:
+      - fps measured by decoding the first ~5s (metadata often lies on
+        security-camera exports);
+      - DVR containers (.dav) reporting ZERO frames get a grab()-only count
+        (demux without decode — fast) instead of being skipped;
+      - 0/NaN fps metadata falls back to 25 so downstream never divides by
+        zero when building timestamps.
+    Returns (total_frames, fps); total_frames == 0 means truly unreadable.
+    """
+    name = Path(source).name
     cap = cv2.VideoCapture(source)
+    if not cap.isOpened():
+        cap.release()
+        return 0, 25.0
     total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
     fps_metadata = cap.get(cv2.CAP_PROP_FPS)
 
-    # Calculate actual fps (metadata is often wrong for security cameras)
     frames_to_check = 0
-    pos_sec = 0
+    pos_sec = 0.0  # stays 0 when not a single frame decodes (bad stream)
     while frames_to_check < 100:
         ret, _ = cap.read()
         if not ret:
             break
         frames_to_check += 1
         pos_sec = cap.get(cv2.CAP_PROP_POS_MSEC) / 1000
-        if pos_sec >= 5:
+        if pos_sec >= 5:  # first ~5 seconds are enough for a stable rate
             break
-
-    if pos_sec > 0 and frames_to_check > 0:
-        fps = frames_to_check / pos_sec
-    else:
-        fps = fps_metadata
-
+    fps = (frames_to_check / pos_sec if pos_sec > 0 and frames_to_check > 0
+           else fps_metadata)
     cap.release()
+
+    if total_frames <= 0:
+        log_stderr(f'{name}: no frame count in metadata — counting frames '
+                   f'(DVR container)...')
+        if json_progress:
+            emit_json('status', message=f'Καταμέτρηση καρέ ({name}: '
+                                        f'αρχείο DVR χωρίς μεταδεδομένα)...')
+        probe = cv2.VideoCapture(source)
+        total_frames = 0
+        while probe.grab():
+            total_frames += 1
+        probe.release()
+        log_stderr(f'{name}: counted {total_frames} frames')
+
+    if not fps or fps <= 0 or fps != fps:  # 0/NaN — common in .dav exports
+        log_stderr(f'{name}: no usable fps in metadata — assuming 25')
+        fps = 25.0
     return total_frames, fps
 
 
