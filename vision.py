@@ -578,12 +578,35 @@ def process_video(source: str, yolo: YOLO, cfg: dict, args, video_index: int = 1
 
     cap.release()
 
+    if total_frames <= 0:
+        # DVR containers (Dahua .dav etc.) often report ZERO frames in the
+        # metadata while the stream decodes perfectly (Windows field case:
+        # both XVR .dav files were skipped and the report came out empty).
+        # Count by grab() — demux-only, no decode, orders of magnitude
+        # faster than reading — and only skip when not a single frame grabs.
+        log_stderr(f'{source_path.name}: no frame count in metadata — '
+                   f'counting frames (DVR container)...')
+        if json_progress:
+            emit_json('status', message=f'Καταμέτρηση καρέ ({source_path.name}: '
+                                        f'αρχείο DVR χωρίς μεταδεδομένα)...')
+        probe = cv2.VideoCapture(source)
+        counted = 0
+        while probe.grab():
+            counted += 1
+        probe.release()
+        total_frames = counted
+        log_stderr(f'{source_path.name}: counted {total_frames} frames')
+
     if total_frames == 0:
         # Video file may be corrupt, empty, or in unsupported format
         log_stderr(f'Skipping {source_path.name}: could not read video (0 frames detected)')
         if json_progress:
             emit_json('status', message=f'Παράβλεψη {source_path.name}: δεν μπόρεσε να αναγνωριστεί')
         return None, None
+
+    if not fps or fps <= 0 or fps != fps:  # 0/NaN metadata — common in .dav
+        log_stderr(f'{source_path.name}: no usable fps in metadata — assuming 25')
+        fps = 25.0
 
     # Output directory for YOLO (only if saving video/crops)
     output_dir = args.output or str(source_path.parent)
@@ -763,6 +786,17 @@ def run_match_mode(video_files: list, yolo: YOLO, cfg: dict, args) -> list:
         sources[name] = source
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
+
+    if not any(per_video.values()):
+        # Every video was skipped (unreadable) or produced zero tracks — a
+        # combined report here is an EMPTY page that reads as a silent
+        # failure (Windows field case with two skipped .dav files). Surface
+        # the error instead.
+        log_stderr('Match mode: no tracks from any video — no report')
+        if json_progress:
+            emit_json('error', message='Κανένα βίντεο δεν έδωσε αποτελέσματα — '
+                                       'ελέγξτε αν τα αρχεία είναι αναγνώσιμα')
+        return []
 
     if json_progress:
         emit_json('status', message='Αντιστοίχιση αντικειμένων μεταξύ βίντεο...')

@@ -286,6 +286,18 @@ def open_video(path: str) -> tuple:
         fail(f'cannot open video: {path}')
     total = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
     fps = cap.get(cv2.CAP_PROP_FPS) or 25.0
+    if fps <= 0 or fps != fps:
+        fps = 25.0
+    if total <= 0:
+        # DVR containers (.dav) often report zero frames while decoding
+        # fine — count by grab() (demux-only, fast) before giving up.
+        log('Καταμέτρηση καρέ (αρχείο DVR χωρίς μεταδεδομένα)...')
+        probe = cv2.VideoCapture(path)
+        total = 0
+        while probe.grab():
+            total += 1
+        probe.release()
+        log(f'  {total} καρέ')
     if total <= 0:
         fail(f'could not read video (0 frames detected): {path}')
     return cap, total, fps

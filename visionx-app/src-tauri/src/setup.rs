@@ -561,13 +561,17 @@ pub async fn run_setup(
             },
         );
 
+        // --upgrade is REQUIRED with --target installs: without it pip warns
+        // "Target directory ... already exists" and keeps the STALE package
+        // (Windows field case: half-downloaded torch survived a retry, and
+        // opencv-contrib never actually replaced the headless cv2 -> no CSRT).
         let mut pip_args = vec![
-            "-m", "pip", "install", "--index-url", index_url, "torch>=2.10.0", "torchvision>=0.25.0",
+            "-m", "pip", "install", "--upgrade", "--index-url", index_url, "torch>=2.10.0", "torchvision>=0.25.0",
         ];
         let target_str = packages_dir.to_string_lossy().to_string();
         if use_target {
-            pip_args.insert(3, "--target");
-            pip_args.insert(4, &target_str);
+            pip_args.push("--target");
+            pip_args.push(&target_str);
         }
 
         run_command(
@@ -625,7 +629,7 @@ pub async fn run_setup(
 
     if !missing.is_empty() {
         logger.info(&format!("Installing missing packages: {}", missing.join(", ")));
-        let mut pip_args: Vec<&str> = vec!["-m", "pip", "install"];
+        let mut pip_args: Vec<&str> = vec!["-m", "pip", "install", "--upgrade"];
         if use_target {
             pip_args.push("--target");
             pip_args.push(&target_str);
@@ -658,7 +662,7 @@ pub async fn run_setup(
                 total_steps,
             },
         );
-        let mut trt_args: Vec<&str> = vec!["-m", "pip", "install", "--only-binary", ":all:"];
+        let mut trt_args: Vec<&str> = vec!["-m", "pip", "install", "--upgrade", "--only-binary", ":all:"];
         if use_target {
             trt_args.push("--target");
             trt_args.push(&target_str);
@@ -712,7 +716,7 @@ pub async fn run_setup(
     if !check_python_module(&python_exe, "clip", None, pkg_dir_opt, logger) {
         logger.info("Installing OpenAI CLIP");
         let mut clip_args: Vec<&str> = vec![
-            "-m", "pip", "install",
+            "-m", "pip", "install", "--upgrade",
         ];
         if use_target {
             clip_args.push("--target");
@@ -747,7 +751,7 @@ pub async fn run_setup(
     if !csrt_ok {
         logger.info("Installing opencv-contrib-python (CSRT tracker for plate.py)");
         let mut cv_args: Vec<&str> = vec![
-            "-m", "pip", "install", "--force-reinstall", "--no-deps",
+            "-m", "pip", "install", "--upgrade", "--force-reinstall", "--no-deps",
         ];
         if use_target {
             cv_args.push("--target");
@@ -836,7 +840,7 @@ pub async fn run_setup(
             "-c",
             // cv2/csrt checks verify the opencv-contrib clobber fix actually held
             // (a later pip run reinstalling plain opencv-python would break plate.py).
-            "import torch; import ultralytics; import cv2; import fast_plate_ocr; print(f'torch={torch.__version__} cuda={torch.cuda.is_available()} cv2={cv2.__version__} csrt={hasattr(cv2, \"TrackerCSRT_create\")}')",
+            "import torch; import ultralytics; import cv2; import fast_plate_ocr; print(f'torch={torch.__version__} cuda={torch.cuda.is_available()} cv2={cv2.__version__} csrt={hasattr(cv2, \"TrackerCSRT_create\")}'); assert hasattr(cv2, 'TrackerCSRT_create'), 'opencv-contrib clobber failed: CSRT missing'",
         ],
         if use_target { Some(("PYTHONPATH", packages_dir.to_str().unwrap())) } else { None },
         logger,
