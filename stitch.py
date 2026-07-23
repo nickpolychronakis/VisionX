@@ -225,6 +225,11 @@ def stitch_tracks(tracks: dict, sim_threshold: float = DEFAULT_THRESHOLD,
         a['static'] = a.get('static', False) and b.get('static', False)
         a['snapshots'] = sorted(a.get('snapshots', []) + b.get('snapshots', []),
                                 key=lambda s: -s['score'])[:4]
+        # Per-frame boxes must follow the merge too, or the playback overlay
+        # draws the ROOT tracklet's position while a MERGED interval plays
+        # (field bug: box on the wrong car). Concatenate; prepare_for_report
+        # re-sorts by frame index.
+        a['_boxes'] = (a.get('_boxes') or []) + (b.get('_boxes') or [])
         a['merged_from'] = sorted(set(a.get('merged_from', [ri])
                                       + b.get('merged_from', [rj])))
         # Weighted mean of embeddings keeps the group signature honest for

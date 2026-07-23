@@ -210,15 +210,23 @@ def prepare_for_report(tracks: dict) -> dict:
     older consumers keep working."""
     for t in tracks.values():
         # Playback overlay: downsampled per-frame boxes (full-frame pixel
-        # coords) so the report's clip player can draw the vehicle box —
-        # and its plate — during replay, like the live preview but for one
-        # object. ≤300 points ≈ 3KB per track.
-        boxes = t.get('_boxes') or []
+        # coords) so the report's clip player draws the vehicle box — and
+        # its plate — during replay, like the live preview but for one
+        # object. ≤300 points ≈ 3KB per track. Boxes are TIMESTAMP-indexed
+        # (seconds): the report's <video> clock is real presentation time,
+        # so indexing on currentTime directly is robust to the variable
+        # frame rates common in DVR/dashcam exports — an fps multiply in JS
+        # drifted the box off the vehicle. sorted(): after stitching merged
+        # fragments, boxes arrive out of frame order; the binary search and
+        # interpolation both need them monotonic in time.
+        boxes = sorted(t.get('_boxes') or [])
         if boxes:
+            fps = float(t.get('_video_fps') or 25.0)
             step = max(1, len(boxes) // 300)
             t['playback'] = {
-                'fps': round(float(t.get('_video_fps') or 25.0), 3),
-                'boxes': [[int(v) for v in b] for b in boxes[::step]],
+                'boxes': [[round(b[0] / fps, 3), int(b[1]), int(b[2]),
+                           int(b[3]), int(b[4])]
+                          for b in boxes[::step]],
             }
         snaps = t.get('snapshots', [])
         t['snapshots_b64'] = [base64.b64encode(s['jpeg']).decode('utf-8')

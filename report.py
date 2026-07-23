@@ -53,7 +53,9 @@ def generate_report(tracks: dict, output_dir: str, video_name: str, video_path: 
     for track_id, track in tracks.items():
         pb = track.get('playback')
         if pb and pb.get('boxes'):
-            entry = {'fps': pb['fps'], 'boxes': pb['boxes']}
+            # boxes are [timestamp_sec, x1, y1, x2, y2] — no fps needed
+            # (the overlay indexes on the <video> clock directly).
+            entry = {'boxes': pb['boxes']}
             rel = (track.get('plate') or {}).get('rel_box')
             if rel:
                 entry['plate'] = [round(float(v), 4) for v in rel]
@@ -684,8 +686,8 @@ def generate_report(tracks: dict, output_dir: str, video_name: str, video_path: 
             const g = c.getContext('2d');
             g.clearRect(0, 0, c.width, c.height);
             const B = clipTrack.boxes;
-            const f = v.currentTime * clipTrack.fps;
-            if (f < B[0][0] - 8 || f > B[B.length - 1][0] + 8) return;
+            const f = v.currentTime;  // seconds — boxes are timestamp-indexed
+            if (f < B[0][0] - 0.3 || f > B[B.length - 1][0] + 0.3) return;
             let lo = 0, hi = B.length - 1;
             while (lo < hi) {{ const m = (lo + hi) >> 1; if (B[m][0] < f) lo = m + 1; else hi = m; }}
             const j = Math.max(1, lo);
