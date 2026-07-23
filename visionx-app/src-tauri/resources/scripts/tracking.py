@@ -18,6 +18,22 @@ import cv2
 import numpy as np
 
 
+# Host-vehicle (dashcam hood) geometric signature — the ONE definition,
+# consumed track-level here and per-frame by vision.py's preview filter:
+# a wide vehicle box glued to the frame's bottom edge, in the lower half.
+HOST_BOTTOM_FRAC = 0.96   # box bottom at/under the frame's bottom edge
+HOST_TOP_MIN_FRAC = 0.45  # box starts in the lower half (a hood, not a bus)
+HOST_WIDTH_MIN_FRAC = 0.35  # spans a large share of the frame width
+
+
+def is_host_geometry(x1: float, y1: float, x2: float, y2: float,
+                     frame_w: float, frame_h: float) -> bool:
+    """True when a vehicle box matches the recording car's own hood."""
+    return bool(y2 >= HOST_BOTTOM_FRAC * frame_h
+                and y1 >= HOST_TOP_MIN_FRAC * frame_h
+                and (x2 - x1) >= HOST_WIDTH_MIN_FRAC * frame_w)
+
+
 class TrackCollector:
     """Accumulates per-track state during a streaming yolo.track() run."""
 
@@ -115,9 +131,13 @@ class TrackCollector:
                 'jpeg': jpeg.tobytes(), 'box': (x1, y1, x2, y2),
                 'context': context}
         # Temporal diversity: K snapshots must not be K consecutive frames.
-        # A new candidate within 0.7s of an existing one REPLACES it (if
-        # better) instead of crowding out other moments of the track.
-        near = next((s for s in snaps if abs(s['ts'] - timestamp) < 0.7
+        # ADAPTIVE window (user feedback: short tracks ended up with ONE
+        # snapshot): the spacing requirement scales with the track's life so
+        # far — a 2s pass still yields several distinct moments, while long
+        # tracks keep the 0.7s spread.
+        lifetime = timestamp - t['first_seen']
+        window = max(0.15, min(0.7, lifetime / (self.max_snapshots + 1)))
+        near = next((s for s in snaps if abs(s['ts'] - timestamp) < window
                      and s.get('file') == source_name), None)
         if near is not None:
             if proxy > near['score']:
@@ -156,19 +176,19 @@ class TrackCollector:
                 'file': t.get('first_seen_file'),
             }]
             # Host-vehicle signature (dashcam footage): the recording car
-            # detects its OWN hood as a "car" — a wide box glued to the
-            # bottom edge, in the lower half, across many frames. Flagged
-            # (and excluded from the live preview) but never hidden: the
-            # report keeps the card with a badge — annotate, do not hide.
+            # detects its OWN hood as a "car". Flagged (and excluded from
+            # the live preview) but never hidden: the report keeps the card
+            # with a badge — annotate, do not hide. Geometry logic shared
+            # with vision.py's per-frame check via is_host_geometry().
             bx = t.get('_boxes') or []
             fw, fh = t.get('_frame_wh', (0, 0))
             if bx and fw and t['frame_count'] >= 10:
                 mw = sum(b[3] - b[1] for b in bx) / len(bx)
                 my1 = sum(b[2] for b in bx) / len(bx)
                 my2 = sum(b[4] for b in bx) / len(bx)
-                t['host_vehicle'] = bool(my2 >= 0.96 * fh
-                                         and my1 >= 0.45 * fh
-                                         and mw >= 0.35 * fw)
+                cx = mw / 2  # x irrelevant to the signature; keep API simple
+                t['host_vehicle'] = is_host_geometry(cx, my1, cx + mw, my2,
+                                                     fw, fh)
             else:
                 t['host_vehicle'] = False
             for k in ('_pos_sum', '_pos_sumsq'):

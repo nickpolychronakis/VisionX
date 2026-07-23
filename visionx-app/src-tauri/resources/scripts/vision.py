@@ -20,7 +20,7 @@ from tqdm import tqdm
 from ultralytics import YOLO  # type: ignore[attr-defined]
 from ultralytics.data.utils import IMG_FORMATS, VID_FORMATS
 from report import generate_report
-from tracking import TrackCollector, prepare_for_report
+from tracking import TrackCollector, is_host_geometry, prepare_for_report
 import stitch as stitch_mod
 
 # Add .dav (Dahua DVR format) support - OpenCV can read these
@@ -45,7 +45,7 @@ DEFAULT_CONFIG = {
     'stitch': True,
     'stitch_threshold': 0.88,
     'stitch_embed_model': 'yoloe-26n-seg.pt',
-    'snapshots': 4,
+    'snapshots': 6,
     # Automatic plate reading on every vehicle track (ROADMAP Phase B):
     # detector + 3-model OCR ensemble vote over the track's best snapshots.
     # Candidate-generation quality — the interactive plate.py remains the
@@ -162,15 +162,14 @@ _PREVIEW_PLATES: dict = {'det': None, 'mod': None, 'failed': False}
 
 
 def _is_host_box(result, i: int) -> bool:
-    """Per-frame version of the host-vehicle signature (see tracking.py):
-    a wide vehicle box glued to the bottom edge of the frame = the
-    recording car detecting its own hood."""
+    """Per-frame host-vehicle check — geometry shared with tracking.py
+    (single definition of the signature constants)."""
     try:
         if int(result.boxes.cls[i]) not in (2, 3, 5, 7):
             return False
         x1, y1, x2, y2 = (float(v) for v in result.boxes.xyxy[i])
         fh, fw = result.orig_img.shape[:2]
-        return y2 >= 0.96 * fh and y1 >= 0.45 * fh and (x2 - x1) >= 0.35 * fw
+        return is_host_geometry(x1, y1, x2, y2, fw, fh)
     except Exception:  # noqa: BLE001
         return False
 
@@ -185,11 +184,11 @@ def draw_plate_quads(annotated: np.ndarray, result) -> None:
         return
     try:
         if _PREVIEW_PLATES['det'] is None:
-            from open_image_models import LicensePlateDetector
             import plate as plate_mod
-            _PREVIEW_PLATES['det'] = LicensePlateDetector(
-                detection_model=plate_mod.DEFAULT_DETECTOR_MODEL,
-                conf_thresh=0.2, providers=['CPUExecutionProvider'])
+            # Shared factory (CPU-provider rationale lives with it — DRY).
+            # conf 0.2: the preview draws instantly, so it prefers fewer
+            # false quads over recall; the analysis keeps its own 0.15.
+            _PREVIEW_PLATES['det'] = plate_mod.make_plate_detector(conf=0.2)
             _PREVIEW_PLATES['mod'] = plate_mod
         det = _PREVIEW_PLATES['det']
         pm = _PREVIEW_PLATES['mod']
@@ -708,46 +707,10 @@ def process_video(source: str, yolo: YOLO, cfg: dict, args, video_index: int = 1
             emit_json('status', message=f'Παράβλεψη {source_path.name}: '
                                         f'δεν αναγνωρίζεται ως βίντεο')
         return None, None
-    total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-    fps_metadata = cap.get(cv2.CAP_PROP_FPS)
-
-    # Calculate actual fps (metadata is often wrong for security cameras)
-    frames_to_check = 0
-    pos_sec = 0.0  # stays 0 when not a single frame decodes (bad stream)
-    while frames_to_check < 100:
-        ret, _ = cap.read()
-        if not ret:
-            break
-        frames_to_check += 1
-        pos_sec = cap.get(cv2.CAP_PROP_POS_MSEC) / 1000
-        if pos_sec >= 5:  # Check first 5 seconds
-            break
-
-    if pos_sec > 0 and frames_to_check > 0:
-        fps = frames_to_check / pos_sec
-    else:
-        fps = fps_metadata
-
     cap.release()
-
-    if total_frames <= 0:
-        # DVR containers (Dahua .dav etc.) often report ZERO frames in the
-        # metadata while the stream decodes perfectly (Windows field case:
-        # both XVR .dav files were skipped and the report came out empty).
-        # Count by grab() — demux-only, no decode, orders of magnitude
-        # faster than reading — and only skip when not a single frame grabs.
-        log_stderr(f'{source_path.name}: no frame count in metadata — '
-                   f'counting frames (DVR container)...')
-        if json_progress:
-            emit_json('status', message=f'Καταμέτρηση καρέ ({source_path.name}: '
-                                        f'αρχείο DVR χωρίς μεταδεδομένα)...')
-        probe = cv2.VideoCapture(source)
-        counted = 0
-        while probe.grab():
-            counted += 1
-        probe.release()
-        total_frames = counted
-        log_stderr(f'{source_path.name}: counted {total_frames} frames')
+    # Shared probe (frame count + real fps, incl. the DVR grab-count and
+    # fps fallbacks) — one implementation for every caller.
+    total_frames, fps = get_video_fps(source, json_progress=json_progress)
 
     if total_frames == 0:
         # Video file may be corrupt, empty, or in unsupported format
@@ -755,10 +718,6 @@ def process_video(source: str, yolo: YOLO, cfg: dict, args, video_index: int = 1
         if json_progress:
             emit_json('status', message=f'Παράβλεψη {source_path.name}: δεν μπόρεσε να αναγνωριστεί')
         return None, None
-
-    if not fps or fps <= 0 or fps != fps:  # 0/NaN metadata — common in .dav
-        log_stderr(f'{source_path.name}: no usable fps in metadata — assuming 25')
-        fps = 25.0
 
     # Output directory for YOLO (only if saving video/crops)
     output_dir = args.output or str(source_path.parent)
@@ -918,6 +877,34 @@ def process_video(source: str, yolo: YOLO, cfg: dict, args, video_index: int = 1
     if defer_report:
         return None, tracks
 
+    # Single-video correlation review (user request: "how do I merge the
+    # same vehicle HERE?"): when possible re-appearances exist, offer the
+    # SAME review screen as multi-camera runs — the accepted pairs then
+    # regenerate one unified report via --finalize-match. Written BEFORE
+    # prepare_for_report strips the raw snapshots the finalize needs.
+    if json_progress and any(t.get('reappearance') for t in tracks.values()):
+        # Deduplicate the (a, b) / (b, a) mirror annotations into pairs, then
+        # delegate ALL serialization to the shared writer.
+        vname = source_path.name
+        seen_pairs: set = set()
+        uncertain_ui = []
+        for tid, t in tracks.items():
+            for r in t.get('reappearance') or []:
+                key = tuple(sorted((tid, r['other'])))
+                if key in seen_pairs:
+                    continue
+                seen_pairs.add(key)
+                uncertain_ui.append({
+                    'members': [[vname, key[0]], [vname, key[1]]],
+                    'evidence': r['evidence'] + f' · κενό {r["gap"]:.0f}s',
+                    'score': r['score'],
+                })
+        write_review_session({vname: tracks}, {vname: str(source_path)},
+                             args.output or str(source_path.parent),
+                             groups=[], uncertain=uncertain_ui,
+                             prefix=f'{source_path.stem}_review',
+                             json_progress=json_progress)
+
     tracks = prepare_for_report(tracks)
 
     # Generate HTML report
@@ -933,6 +920,81 @@ def process_video(source: str, yolo: YOLO, cfg: dict, args, video_index: int = 1
             print(f'  Report: {report_path}')
 
     return report_path, None
+
+
+
+def write_review_session(per_video: dict, sources: dict, out_dir: str,
+                         groups: list, uncertain: list, prefix: str,
+                         json_progress: bool) -> None:
+    """Persist a correlation-review session (the ONE implementation — used
+    by multi-camera match mode and by the single-video re-appearance flow;
+    an earlier copy-paste of this block is exactly what the DRY audit
+    flagged).
+
+    Writes two artifacts to out_dir:
+      {prefix}_session.pkl  — full pre-report tracks (raw snapshot bytes),
+                              shallow-copied HERE so a later
+                              prepare_for_report on the originals cannot
+                              strip what --finalize-match needs;
+      {prefix}_review.json  — light UI payload (one thumbnail per track)
+                              for the review screen.
+    Emits the match_review event so the app opens the review screen.
+    Failures only log: the review flow is additive, never fatal.
+    """
+    session_pkl = str(Path(out_dir) / f'{prefix}_session.pkl')
+    review_json = str(Path(out_dir) / f'{prefix}_review.json')
+
+    def group_ui(g: dict) -> dict:
+        # Normalize both shapes callers produce: cross_match groups carry
+        # (video, tid) tuples + a combined_plate DICT; re-appearance pairs
+        # carry [video, tid] lists + no combined plate. The Greek evidence
+        # label ships READY-MADE (shared table in cross_match) so the Vue
+        # review screen renders it verbatim instead of translating.
+        from cross_match import evidence_label_el
+        combo = g.get('combined_plate')
+        label, tier = evidence_label_el(g.get('evidence'))
+        return {'members': [[v, tid] for v, tid in g['members']],
+                'evidence': g.get('evidence'),
+                'evidence_label': label,
+                'evidence_tier': tier,
+                'score': g.get('score'),
+                'combined_plate': (combo.get('plate')
+                                   if isinstance(combo, dict) else combo)}
+
+    try:
+        import pickle
+        copies = {v: {tid: dict(t) for tid, t in tracks.items()}
+                  for v, tracks in per_video.items()}
+        with open(session_pkl, 'wb') as f:
+            pickle.dump({'sources': {n: str(p2) for n, p2 in sources.items()},
+                         'per_video': copies}, f,
+                        protocol=pickle.HIGHEST_PROTOCOL)
+        ui = {'videos': {n: str(p2) for n, p2 in sources.items()},
+              'session': session_pkl,
+              'groups': [group_ui(g) for g in groups],
+              'uncertain': [group_ui(g) for g in uncertain],
+              'tracks': {}}
+        for vname, tracks in copies.items():
+            ui['tracks'][vname] = {}
+            for tid, t in tracks.items():
+                snaps = t.get('snapshots') or []
+                ui['tracks'][vname][str(tid)] = {
+                    'class': t['class'],
+                    'first_seen': round(t['first_seen'], 1),
+                    'last_seen': round(t['last_seen'], 1),
+                    'static': bool(t.get('static')),
+                    'plate': (t.get('plate') or {}).get('plate'),
+                    'color': (t.get('attrs') or {}).get('color'),
+                    'thumb': (base64.b64encode(snaps[0]['jpeg']).decode('ascii')
+                              if snaps else None),
+                }
+        with open(review_json, 'w', encoding='utf-8') as f:
+            json.dump(ui, f, ensure_ascii=False)
+        if json_progress:
+            emit_json('match_review', path=review_json)
+        log_stderr(f'Review session: {review_json}')
+    except Exception as e:  # noqa: BLE001 — review is additive, never fatal
+        log_stderr(f'Review session write failed ({e})')
 
 
 def run_finalize_match(args) -> str | None:
@@ -1097,18 +1159,12 @@ def run_match_mode(video_files: list, yolo: YOLO, cfg: dict, args) -> list:
     log_stderr(f'Cross-match: {len(groups)} matched objects across '
                f'{len(video_files)} videos')
 
-    # Shallow-copied track dicts for the review session: prepare_for_report
-    # (below) pops raw snapshots/embeddings from the ORIGINAL dicts — these
-    # copies keep their own key set, so the pickle retains the full data.
-    _session_tracks = {v: {tid: dict(t) for tid, t in tracks.items()}
-                       for v, tracks in per_video.items()}
-
-    def groups_ui(gs):
-        return [{'members': [[v, tid] for v, tid in g['members']],
-                 'evidence': g.get('evidence'),
-                 'score': g.get('score'),
-                 'combined_plate': (g.get('combined_plate') or {}).get('plate')}
-                for g in gs]
+    # Review session FIRST: the shared writer shallow-copies the tracks, so
+    # it must run before prepare_for_report (below) strips raw snapshots.
+    write_review_session(per_video, sources,
+                         args.output or str(Path(video_files[0]).parent),
+                         groups=groups, uncertain=uncertain,
+                         prefix='visionx_match', json_progress=json_progress)
 
     # Reports: per-video first (prepare_for_report encodes the snapshots the
     # match report also embeds), then the combined match report.
@@ -1122,46 +1178,6 @@ def run_match_mode(video_files: list, yolo: YOLO, cfg: dict, args) -> list:
         reports.append(rp)
         if json_progress:
             emit_json('report', path=rp)
-    # Review session (user workflow): the app opens a review screen where
-    # confident matches can be REJECTED and uncertain ones ACCEPTED; the
-    # final decisions regenerate ONE combined report via --finalize-match.
-    # The pickle keeps the full pre-report tracks (raw snapshot bytes) —
-    # written BEFORE prepare_for_report mutates them; the JSON is the light
-    # UI payload (one thumbnail per track).
-    session_pkl = str(Path(output_dir) / 'visionx_match_session.pkl')
-    review_json = str(Path(output_dir) / 'visionx_match_review.json')
-    try:
-        import pickle
-        with open(session_pkl, 'wb') as f:
-            pickle.dump({'sources': sources, 'per_video': _session_tracks},
-                        f, protocol=pickle.HIGHEST_PROTOCOL)
-        ui = {'videos': {n: str(p) for n, p in sources.items()},
-              'session': session_pkl,
-              'tracks': {}, 'groups': groups_ui(groups),
-              'uncertain': groups_ui(uncertain)}
-        for vname, tracks in _session_tracks.items():
-            ui['tracks'][vname] = {}
-            for tid, t in tracks.items():
-                snaps = t.get('snapshots') or []
-                thumb = (base64.b64encode(snaps[0]['jpeg']).decode('ascii')
-                         if snaps else None)
-                ui['tracks'][vname][str(tid)] = {
-                    'class': t['class'],
-                    'first_seen': round(t['first_seen'], 1),
-                    'last_seen': round(t['last_seen'], 1),
-                    'static': bool(t.get('static')),
-                    'plate': (t.get('plate') or {}).get('plate'),
-                    'color': (t.get('attrs') or {}).get('color'),
-                    'thumb': thumb,
-                }
-        with open(review_json, 'w', encoding='utf-8') as f:
-            json.dump(ui, f, ensure_ascii=False)
-        if json_progress:
-            emit_json('match_review', path=review_json)
-        log_stderr(f'Match review session: {review_json}')
-    except Exception as e:  # noqa: BLE001 — review is additive, never fatal
-        log_stderr(f'Match session write failed ({e})')
-
     from match_report import generate_match_report
     mp = generate_match_report(per_video, groups, output_dir,
                                list(per_video.keys()))
@@ -1173,30 +1189,56 @@ def run_match_mode(video_files: list, yolo: YOLO, cfg: dict, args) -> list:
     return reports
 
 
-def get_video_fps(source: str) -> tuple[int, float]:
-    """Get total frames and actual fps for a video"""
+def get_video_fps(source: str, json_progress: bool = False) -> tuple[int, float]:
+    """Total frames + ACTUAL fps for a video — the ONE probe implementation
+    (process_video had accumulated a hardened inline copy; the DRY audit
+    merged them). Hardening carried over from field cases:
+      - fps measured by decoding the first ~5s (metadata often lies on
+        security-camera exports);
+      - DVR containers (.dav) reporting ZERO frames get a grab()-only count
+        (demux without decode — fast) instead of being skipped;
+      - 0/NaN fps metadata falls back to 25 so downstream never divides by
+        zero when building timestamps.
+    Returns (total_frames, fps); total_frames == 0 means truly unreadable.
+    """
+    name = Path(source).name
     cap = cv2.VideoCapture(source)
+    if not cap.isOpened():
+        cap.release()
+        return 0, 25.0
     total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
     fps_metadata = cap.get(cv2.CAP_PROP_FPS)
 
-    # Calculate actual fps (metadata is often wrong for security cameras)
     frames_to_check = 0
-    pos_sec = 0
+    pos_sec = 0.0  # stays 0 when not a single frame decodes (bad stream)
     while frames_to_check < 100:
         ret, _ = cap.read()
         if not ret:
             break
         frames_to_check += 1
         pos_sec = cap.get(cv2.CAP_PROP_POS_MSEC) / 1000
-        if pos_sec >= 5:
+        if pos_sec >= 5:  # first ~5 seconds are enough for a stable rate
             break
-
-    if pos_sec > 0 and frames_to_check > 0:
-        fps = frames_to_check / pos_sec
-    else:
-        fps = fps_metadata
-
+    fps = (frames_to_check / pos_sec if pos_sec > 0 and frames_to_check > 0
+           else fps_metadata)
     cap.release()
+
+    if total_frames <= 0:
+        log_stderr(f'{name}: no frame count in metadata — counting frames '
+                   f'(DVR container)...')
+        if json_progress:
+            emit_json('status', message=f'Καταμέτρηση καρέ ({name}: '
+                                        f'αρχείο DVR χωρίς μεταδεδομένα)...')
+        probe = cv2.VideoCapture(source)
+        total_frames = 0
+        while probe.grab():
+            total_frames += 1
+        probe.release()
+        log_stderr(f'{name}: counted {total_frames} frames')
+
+    if not fps or fps <= 0 or fps != fps:  # 0/NaN — common in .dav exports
+        log_stderr(f'{name}: no usable fps in metadata — assuming 25')
+        fps = 25.0
     return total_frames, fps
 
 
@@ -1374,9 +1416,11 @@ def _parallel_worker(worker_args: dict) -> str | None:
     return report_path
 
 
-# Common video formats (dav = Dahua DVR format)
-VIDEO_EXTENSIONS = ['mp4', 'm4v', 'avi', 'mov', 'mkv', 'wmv', 'flv', 'webm',
-                    'mpeg', 'mpg', 'ts', 'mts', 'm2ts', '3gp', 'asf', 'dav']
+# Supported video containers — the SINGLE SOURCE OF TRUTH for the whole
+# app (main.rs VIDEO_EXTS and FileSelector.vue mirror it; a unit test
+# fails on any divergence — they had already drifted apart once).
+# dav = Dahua DVR, bin = Hikvision raw export.
+VIDEO_EXTENSIONS = ['mp4', 'm4v', 'avi', 'mov', 'mkv', 'wmv', 'flv', 'webm', 'mpeg', 'mpg', 'ts', 'mts', 'm2ts', '3gp', 'asf', 'dav', 'bin']
 
 
 def _videos_in_dir(dir_path: Path) -> list[str]:

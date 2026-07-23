@@ -655,6 +655,40 @@ def make_tracker(kind: str):
     return cv2.TrackerCSRT_create()
 
 
+# One measured plate-geometry gate for EVERY consumer (live preview,
+# auto-ALPR, b-scan use kindred logic): a real plate occupies a FRACTION of
+# its vehicle crop with plate-like aspect. Field case that forced it: the
+# dashcam timestamp/logo bar spans most of the hood "vehicle" and read as a
+# confident plate. 0.6 width fraction (the looser of the two values that
+# had silently diverged — 0.55 vs 0.6 — chosen so borderline close-ups of
+# genuinely wide plates keep passing; the aspect gate does the real work).
+PLATE_MAX_WIDTH_FRAC = 0.6
+PLATE_ASPECT_RANGE = (1.5, 8.0)
+
+
+def plate_geometry_ok(width: float, height: float, crop_width: int) -> bool:
+    """True when a detector box has believable PLATE geometry inside its
+    vehicle crop (see constants above for the why)."""
+    if height <= 0 or width > PLATE_MAX_WIDTH_FRAC * crop_width:
+        return False
+    lo, hi = PLATE_ASPECT_RANGE
+    return lo <= width / height <= hi
+
+
+def make_plate_detector(model: str | None = None, conf: float = 0.15):
+    """The ONE constructor for the YOLOv9 plate detector (three call sites
+    had duplicated these kwargs). CPU provider explicitly: onnxruntime's
+    CoreML EP cannot express this model's zero-detection output (dynamic
+    {-1} shape with 0 elements) and throws + retries on EVERY empty frame —
+    night footage spammed hundreds of errors/min and silently lost
+    detections the CPU path finds. The tiny YOLOv9-t only ever sees small
+    crops, so CPU costs a few ms."""
+    from open_image_models import LicensePlateDetector
+    return LicensePlateDetector(detection_model=model or DEFAULT_DETECTOR_MODEL,
+                                conf_thresh=conf,
+                                providers=['CPUExecutionProvider'])
+
+
 def bright_plate_quad(crop: np.ndarray):
     """Saturated-plate geometry: on burned night footage a HUMAN instantly
     sees the white parallelogram even though OCR/neural detectors see no
@@ -2121,13 +2155,7 @@ def main():
     # conf_thresh 0.15 (was 0.25): the tracking loop applies its own DET_ACCEPT
     # gate on top; the lib-level threshold only needs to let dusk/small-plate
     # detections (0.15-0.35 range) through for the refinement logic to weigh.
-    # CPU provider explicitly: onnxruntime's CoreML EP cannot express this
-    # model's zero-detection output (dynamic {-1} shape with 0 elements) and
-    # throws + retries on EVERY empty frame — night footage spammed hundreds
-    # of errors/min and wasted the failed-inference time. The tiny YOLOv9-t
-    # runs in a few ms on CPU anyway (it only ever sees small crops).
-    detector = LicensePlateDetector(detection_model=args.detector_model, conf_thresh=0.15,
-                                    providers=['CPUExecutionProvider'])
+    detector = make_plate_detector(args.detector_model)
     model_names = [m.strip() for m in args.ocr_model.split(',') if m.strip()]
     recognizers = [{'name': m, 'rec': LicensePlateRecognizer(m, device='cpu'),
                     'gray': False} for m in model_names]
