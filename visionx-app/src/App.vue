@@ -360,7 +360,9 @@ function startNew() {
     class="app"
     :class="{
       'view-compact':
-        currentView !== 'results' && currentView !== 'processing',
+        currentView !== 'results' &&
+        currentView !== 'processing' &&
+        currentView !== 'review',
     }"
   >
     <header class="header">
@@ -611,6 +613,20 @@ function startNew() {
   overflow-y: auto;
   min-height: 0;
   flex: 1;
+}
+
+/* Review view: fill the window and give the card a REAL height bound —
+   without this the card's own overflow-y:auto had nothing to scroll
+   within (field bug: the pair list was unreachable below the fold). */
+.view-review {
+  display: flex;
+  flex: 1;
+  min-height: 0;
+}
+
+.view-review > * {
+  flex: 1;
+  min-height: 0;
 }
 
 /* The progress card fills the window (user request: use the whole space —

@@ -2,9 +2,11 @@
 // Match-review screen (user workflow): after a multi-camera analysis, the
 // investigator SEES what was auto-matched (and can reject it — the
 // algorithm does err) and what is merely suspected (and can accept it).
+// A MANUAL PAIRING BOARD (user request, dashcam front/back case) covers
+// everything the suggestions miss: pick a track in each column, link them.
 // The decisions then regenerate ONE combined report via vision.py
 // --finalize-match. Human judgment always outranks the algorithm.
-import { ref, onMounted } from "vue";
+import { computed, onMounted, ref } from "vue";
 import { invoke } from "@tauri-apps/api/core";
 
 const props = defineProps<{ reviewPath: string }>();
@@ -31,6 +33,8 @@ interface Group {
   combined_plate: string | null;
 }
 
+type Member = [string, number];
+
 const videos = ref<Record<string, string>>({});
 const tracks = ref<Record<string, Record<string, TrackInfo>>>({});
 const groups = ref<Group[]>([]);
@@ -43,6 +47,14 @@ const finalizeError = ref("");
 // Decision state: confident groups start ACCEPTED, uncertain start REJECTED.
 const acceptedConfident = ref<boolean[]>([]);
 const acceptedUncertain = ref<boolean[]>([]);
+
+// Manual pairing board state: one selected track per column + linked pairs.
+const videoNames = computed(() => Object.keys(videos.value));
+const leftVideo = ref("");
+const rightVideo = ref("");
+const leftSel = ref<Member | null>(null);
+const rightSel = ref<Member | null>(null);
+const manualPairs = ref<[Member, Member][]>([]);
 
 onMounted(async () => {
   try {
@@ -57,12 +69,17 @@ onMounted(async () => {
     session.value = data.session || "";
     acceptedConfident.value = groups.value.map(() => true);
     acceptedUncertain.value = uncertain.value.map(() => false);
+    // Board defaults: first two videos side by side; a single-video session
+    // (same-video re-appearances) pairs within the one video.
+    const names = videoNames.value;
+    leftVideo.value = names[0] ?? "";
+    rightVideo.value = names[1] ?? names[0] ?? "";
   } catch (e) {
     loadError.value = String(e);
   }
 });
 
-function trackOf(m: [string, number]): TrackInfo | null {
+function trackOf(m: Member): TrackInfo | null {
   return tracks.value[m[0]]?.[String(m[1])] ?? null;
 }
 
@@ -73,14 +90,79 @@ function fmtTime(s: number): string {
   return `${String(h).padStart(2, "0")}:${String(m).padStart(2, "0")}:${String(sec).padStart(2, "0")}`;
 }
 
+const memberKey = (m: Member) => `${m[0]}|${m[1]}`;
+const sameMember = (a: Member | null, b: Member) =>
+  !!a && a[0] === b[0] && a[1] === b[1];
+
+// Tracks already inside an ACCEPTED suggestion or a manual pair — shown
+// dimmed with a ✓ so the investigator sees remaining work at a glance.
+const pairedKeys = computed(() => {
+  const keys = new Set<string>();
+  groups.value.forEach((g, i) => {
+    if (acceptedConfident.value[i]) g.members.forEach((m) => keys.add(memberKey(m)));
+  });
+  uncertain.value.forEach((g, i) => {
+    if (acceptedUncertain.value[i]) g.members.forEach((m) => keys.add(memberKey(m)));
+  });
+  manualPairs.value.forEach(([a, b]) => {
+    keys.add(memberKey(a));
+    keys.add(memberKey(b));
+  });
+  return keys;
+});
+
+function columnTracks(video: string, sortNear: Member | null): Member[] {
+  const entries = Object.keys(tracks.value[video] ?? {}).map(
+    (tid) => [video, Number(tid)] as Member,
+  );
+  const ref_t = sortNear ? trackOf(sortNear) : null;
+  return entries.sort((a, b) => {
+    const ta = trackOf(a)!;
+    const tb = trackOf(b)!;
+    if (ref_t) {
+      // TIME PROXIMITY sort (front/back dashcams record the same moment:
+      // the matching track sits at nearly the same timestamp — it floats
+      // to the top the instant a left-column track is selected).
+      return (
+        Math.abs(ta.first_seen - ref_t.first_seen) -
+        Math.abs(tb.first_seen - ref_t.first_seen)
+      );
+    }
+    return ta.first_seen - tb.first_seen;
+  });
+}
+
+const leftTracks = computed(() => columnTracks(leftVideo.value, null));
+const rightTracks = computed(() => columnTracks(rightVideo.value, leftSel.value));
+
+function pick(side: "left" | "right", m: Member) {
+  const sel = side === "left" ? leftSel : rightSel;
+  sel.value = sameMember(sel.value, m) ? null : m;
+}
+
+function linkPair() {
+  if (!leftSel.value || !rightSel.value) return;
+  if (sameMember(leftSel.value, rightSel.value)) return; // same track twice
+  manualPairs.value.push([leftSel.value, rightSel.value]);
+  leftSel.value = null;
+  rightSel.value = null;
+}
+
+function unlinkPair(i: number) {
+  manualPairs.value.splice(i, 1);
+}
+
 async function finalize() {
   busy.value = true;
   finalizeError.value = "";
   try {
-    const chosen = [
-      ...groups.value.filter((_, i) => acceptedConfident.value[i]),
-      ...uncertain.value.filter((_, i) => acceptedUncertain.value[i]),
-    ].map((g) => g.members);
+    // Accepted suggestions + manual pairs, all as member groups — the
+    // python finalize coalesces chains (A-B + B-C → one object).
+    const chosen: Member[][] = [
+      ...groups.value.filter((_, i) => acceptedConfident.value[i]).map((g) => g.members),
+      ...uncertain.value.filter((_, i) => acceptedUncertain.value[i]).map((g) => g.members),
+      ...manualPairs.value.map(([a, b]) => [a, b]),
+    ];
     const report = await invoke<string>("finalize_match", {
       session: session.value,
       decisions: JSON.stringify({ groups: chosen }),
@@ -96,11 +178,11 @@ async function finalize() {
 
 <template>
   <div class="review card card-violet">
-    <h3>Έλεγχος συσχετίσεων μεταξύ βίντεο</h3>
+    <h3>Έλεγχος συσχετίσεων</h3>
     <p class="hint">
-      Ο αλγόριθμος προτείνει — εσείς αποφασίζετε. Απορρίψτε λανθασμένες
-      «σίγουρες» συσχετίσεις και εγκρίνετε όσες πιθανές ισχύουν· μετά θα
-      δημιουργηθεί μία συνδυαστική αναφορά για όλα τα βίντεο.
+      Ο αλγόριθμος προτείνει — εσείς αποφασίζετε. Ελέγξτε τις προτάσεις και
+      συνδέστε χειροκίνητα ό,τι λείπει· μετά θα δημιουργηθεί μία συνδυαστική
+      αναφορά για όλα τα βίντεο.
     </p>
 
     <div v-if="loadError" class="error">{{ loadError }}</div>
@@ -122,7 +204,7 @@ async function finalize() {
           <span>Συσχέτιση</span>
         </label>
         <div class="members">
-          <div v-for="m in g.members" :key="m[0] + m[1]" class="member">
+          <div v-for="m in g.members" :key="memberKey(m)" class="member">
             <img
               v-if="trackOf(m)?.thumb"
               :src="'data:image/jpeg;base64,' + trackOf(m)!.thumb"
@@ -162,7 +244,7 @@ async function finalize() {
           <span>Συσχέτιση</span>
         </label>
         <div class="members">
-          <div v-for="m in g.members" :key="m[0] + m[1]" class="member">
+          <div v-for="m in g.members" :key="memberKey(m)" class="member">
             <img
               v-if="trackOf(m)?.thumb"
               :src="'data:image/jpeg;base64,' + trackOf(m)!.thumb"
@@ -183,6 +265,94 @@ async function finalize() {
         </div>
       </div>
 
+      <h4>
+        Χειροκίνητη αντιστοίχιση
+        <span class="sub"
+          >— επιλέξτε ένα όχημα σε κάθε στήλη και πατήστε «Σύνδεση»· η δεξιά
+          στήλη ταξινομείται κατά χρονική εγγύτητα με την επιλογή σας
+          (μπρος/πίσω κάμερες: το ίδιο όχημα εμφανίζεται σχεδόν ταυτόχρονα)</span
+        >
+      </h4>
+      <div class="board">
+        <div class="col">
+          <select v-model="leftVideo" class="vidsel">
+            <option v-for="v in videoNames" :key="'l' + v" :value="v">{{ v }}</option>
+          </select>
+          <div class="tracklist">
+            <div
+              v-for="m in leftTracks"
+              :key="memberKey(m)"
+              class="trackrow"
+              :class="{
+                selected: sameMember(leftSel, m),
+                paired: pairedKeys.has(memberKey(m)),
+              }"
+              @click="pick('left', m)"
+            >
+              <img
+                v-if="trackOf(m)?.thumb"
+                :src="'data:image/jpeg;base64,' + trackOf(m)!.thumb"
+              />
+              <div class="meta">
+                <strong>{{ trackOf(m)?.class?.toUpperCase() }} #{{ m[1] }}</strong>
+                <span>{{ fmtTime(trackOf(m)!.first_seen) }}</span>
+                <span v-if="trackOf(m)?.plate" class="plate">{{ trackOf(m)!.plate }}</span>
+              </div>
+              <span v-if="pairedKeys.has(memberKey(m))" class="check">✓</span>
+            </div>
+          </div>
+        </div>
+
+        <div class="linkcol">
+          <button
+            class="primary linkbtn"
+            :disabled="!leftSel || !rightSel"
+            @click="linkPair"
+            title="Σύνδεση των δύο επιλεγμένων ως ΙΔΙΟ όχημα"
+          >
+            Σύνδεση ▶◀
+          </button>
+          <div class="pairs">
+            <div v-for="(p, i) in manualPairs" :key="'p' + i" class="pairchip">
+              <span
+                >{{ trackOf(p[0])?.class?.toUpperCase() }} #{{ p[0][1] }} ↔
+                #{{ p[1][1] }}</span
+              >
+              <button class="x" @click="unlinkPair(i)" title="Αποσύνδεση">×</button>
+            </div>
+          </div>
+        </div>
+
+        <div class="col">
+          <select v-model="rightVideo" class="vidsel">
+            <option v-for="v in videoNames" :key="'r' + v" :value="v">{{ v }}</option>
+          </select>
+          <div class="tracklist">
+            <div
+              v-for="m in rightTracks"
+              :key="memberKey(m)"
+              class="trackrow"
+              :class="{
+                selected: sameMember(rightSel, m),
+                paired: pairedKeys.has(memberKey(m)),
+              }"
+              @click="pick('right', m)"
+            >
+              <img
+                v-if="trackOf(m)?.thumb"
+                :src="'data:image/jpeg;base64,' + trackOf(m)!.thumb"
+              />
+              <div class="meta">
+                <strong>{{ trackOf(m)?.class?.toUpperCase() }} #{{ m[1] }}</strong>
+                <span>{{ fmtTime(trackOf(m)!.first_seen) }}</span>
+                <span v-if="trackOf(m)?.plate" class="plate">{{ trackOf(m)!.plate }}</span>
+              </div>
+              <span v-if="pairedKeys.has(memberKey(m))" class="check">✓</span>
+            </div>
+          </div>
+        </div>
+      </div>
+
       <div v-if="finalizeError" class="error">{{ finalizeError }}</div>
 
       <div class="actions">
@@ -200,7 +370,7 @@ async function finalize() {
 <style scoped>
 .review {
   overflow-y: auto;
-  max-height: 100%;
+  min-height: 0;
 }
 .hint {
   color: var(--text-secondary);
@@ -321,5 +491,94 @@ h4 .sub {
   display: flex;
   gap: 10px;
   margin-top: 16px;
+}
+
+/* Manual pairing board */
+.board {
+  display: grid;
+  grid-template-columns: 1fr auto 1fr;
+  gap: 12px;
+  align-items: start;
+}
+.vidsel {
+  width: 100%;
+  margin-bottom: 8px;
+}
+.tracklist {
+  max-height: 340px;
+  overflow-y: auto;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 6px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.trackrow {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 6px 8px;
+  border: 1px solid transparent;
+  border-radius: 8px;
+  cursor: pointer;
+  position: relative;
+}
+.trackrow:hover {
+  background: var(--bg-card);
+}
+.trackrow.selected {
+  border-color: var(--accent);
+  background: rgba(79, 140, 255, 0.12);
+}
+.trackrow.paired {
+  opacity: 0.55;
+}
+.trackrow img {
+  width: 64px;
+  height: 48px;
+  object-fit: cover;
+  border-radius: 6px;
+  border: 1px solid var(--border);
+}
+.trackrow .check {
+  margin-left: auto;
+  color: var(--success);
+  font-weight: 700;
+}
+.linkcol {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  align-items: center;
+  padding-top: 40px;
+  min-width: 170px;
+}
+.linkbtn {
+  white-space: nowrap;
+}
+.pairs {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  width: 100%;
+}
+.pairchip {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  font-size: 0.78rem;
+  border: 1px solid var(--accent);
+  border-radius: 8px;
+  padding: 4px 8px;
+  color: var(--text-primary);
+  background: rgba(79, 140, 255, 0.1);
+}
+.pairchip .x {
+  background: transparent;
+  color: var(--danger);
+  padding: 0 4px;
+  font-size: 1rem;
 }
 </style>
