@@ -10,7 +10,51 @@ env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
 jobs:
+  # Gate: no release ships without green tests. Runs on windows-latest (not
+  # ubuntu) so cargo test compiles the SAME target the release build uses —
+  # find_system_python()/detect_gpu() behave differently per OS, and Linux
+  # would need extra webkit2gtk system packages just to compile the crate.
+  test:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+
+      - name: Install Python test dependencies
+        # Mirrors ci.yml (see its comment): test_vision_helpers.py imports
+        # vision.py, which needs torch/ultralytics at module level. CPU
+        # wheel index — this gate never touches a GPU. shell: bash so the
+        # line continuations work the same as on ci.yml's ubuntu runner
+        # (windows-latest defaults `run:` to PowerShell otherwise).
+        shell: bash
+        run: |
+          pip install torch torchvision --index-url https://download.pytorch.org/whl/cpu
+          pip install numpy opencv-contrib-python fast-alpr onnxruntime pyyaml \
+                      ultralytics tqdm ftfy regex lap
+
+      - name: Run Python unit tests
+        shell: bash
+        run: python -m unittest discover tests -v
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Rust cache
+        uses: swatinem/rust-cache@v2
+        with:
+          workspaces: './visionx-app/src-tauri -> target'
+
+      - name: Run Rust tests
+        working-directory: visionx-app/src-tauri
+        run: cargo test
+
   release:
+    needs: test
     permissions:
       contents: write
     runs-on: windows-latest

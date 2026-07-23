@@ -1,0 +1,63 @@
+name: CI
+
+# Fast feedback on every push/PR — separate from release.yml (which only
+# builds the Windows installer) so a broken test never has to wait for a
+# tag push to be noticed. Audit finding (2026-07-23): CI built the app but
+# ran ZERO tests; a regression could ship all the way to the installer
+# unnoticed. This workflow is the fix for that gap; release.yml also gates
+# the build itself on tests passing (belt and suspenders for what actually
+# reaches users).
+
+on:
+  push:
+    branches: ['**']
+  pull_request:
+
+jobs:
+  python-tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+
+      - name: Install test dependencies
+        # test_vision_helpers.py imports vision.py, which imports torch +
+        # ultralytics at module level — so the fast suite needs them too.
+        # CPU wheel index keeps this a ~1-2 min install instead of pulling
+        # the multi-GB CUDA build; the tests never touch a GPU.
+        run: |
+          pip install torch torchvision --index-url https://download.pytorch.org/whl/cpu
+          pip install numpy opencv-contrib-python fast-alpr onnxruntime pyyaml \
+                      ultralytics tqdm ftfy regex lap
+
+      - name: Run unit tests
+        run: python -m unittest discover tests -v
+
+  frontend-typecheck:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 9
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: 'pnpm'
+          cache-dependency-path: visionx-app/pnpm-lock.yaml
+
+      - name: Install frontend dependencies
+        working-directory: visionx-app
+        run: pnpm install
+
+      - name: vue-tsc type check
+        working-directory: visionx-app
+        run: pnpm exec vue-tsc --noEmit

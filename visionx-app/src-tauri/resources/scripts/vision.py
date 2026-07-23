@@ -997,6 +997,34 @@ def write_review_session(per_video: dict, sources: dict, out_dir: str,
         log_stderr(f'Review session write failed ({e})')
 
 
+def coalesce_member_groups(groups: list) -> list:
+    """Union-find over accepted (video, track_id) pairs/groups: accepting
+    A-B and B-C separately means A, B and C are ONE physical object — this
+    chains them into a single group instead of leaving a member split
+    across two output cards. Extracted from run_finalize_match as a pure,
+    directly-testable function (2026-07-23 test-coverage audit); a bridging
+    triple like [A,B], [C,D], [B,C] must merge all four into one group, not
+    leave two pairs sitting side by side.
+    """
+    coalesced: list[set] = []
+    for g in groups:
+        gs = set(tuple(m) for m in g)
+        merged_into = None
+        for cg in coalesced:
+            if cg & gs:
+                cg |= gs
+                merged_into = cg
+                break
+        if merged_into is None:
+            coalesced.append(gs)
+        else:  # the merge may now bridge previously separate sets
+            rest = [cg for cg in coalesced if cg is not merged_into and cg & merged_into]
+            for cg in rest:
+                merged_into |= cg
+                coalesced.remove(cg)
+    return [sorted(cg) for cg in coalesced]
+
+
 def run_finalize_match(args) -> str | None:
     """Second phase of the review workflow: read the pickled match session +
     the user's accept/reject decisions and produce ONE combined report for
@@ -1013,26 +1041,7 @@ def run_finalize_match(args) -> str | None:
     sources = sess['sources']
     accepted = [[(m[0], int(m[1])) for m in g]
                 for g in decisions.get('groups', [])]
-    # Coalesce accepted groups that share a member: accepting the pairs
-    # A-B and B-C means A, B and C are ONE object — chain them instead of
-    # letting the second pair silently drop to a single leftover member.
-    coalesced: list[set] = []
-    for g in accepted:
-        gs = set(g)
-        merged_into = None
-        for cg in coalesced:
-            if cg & gs:
-                cg |= gs
-                merged_into = cg
-                break
-        if merged_into is None:
-            coalesced.append(gs)
-        else:  # the merge may now bridge previously separate sets
-            rest = [cg for cg in coalesced if cg is not merged_into and cg & merged_into]
-            for cg in rest:
-                merged_into |= cg
-                coalesced.remove(cg)
-    accepted = [sorted(cg) for cg in coalesced]
+    accepted = coalesce_member_groups(accepted)
 
     def tagged_intervals(t, vname):
         ivs = t.get('intervals') or [{'start': t['first_seen'],
