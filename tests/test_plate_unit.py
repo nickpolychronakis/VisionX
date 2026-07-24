@@ -189,5 +189,73 @@ class GrProjectedCandidatesTest(unittest.TestCase):
         self.assertEqual(len(plates), len(set(plates)))
 
 
+class RankPlateAppearancesTest(unittest.TestCase):
+    """The b-scan ranking (jump-to-best-appearance). Field bug (2026-07-24):
+    a burned-in 70mai dashcam watermark ranked #1 and OCR'd as '70100'. It
+    flickered into only ~4 probes (detector conf hovering at the accept
+    threshold), so it slipped past the old `len >= 6` static guard and — being
+    the widest box in the frame — hijacked the top spot over a real moving
+    plate. These pin the fix (static floor lowered to 2: a positionally-frozen
+    box is an overlay regardless of probe count)."""
+
+    LOGO = (27, 1875, 416, 121)  # the actual 70mai box coords from the field
+
+    def _moving_plate(self, n=8, x0=2600, y=400, w0=74):
+        # A genuine close pass: appears in several probes, MARCHES across the
+        # frame and grows as the car nears — never positionally frozen.
+        out = []
+        for k, idx in enumerate(range(300, 300 + n * 150, 150)):
+            w = w0 + k * 2
+            out.append((idx, (x0 + k * 40, y, w, int(w / 4.5)), w))
+        return out
+
+    def test_frozen_logo_deranked_below_moving_plate(self):
+        # The exact field failure: 4-probe frozen 416px logo vs 8-probe moving
+        # 88px plate. Before the fix the logo won on raw width.
+        found = [(i, self.LOGO, self.LOGO[2]) for i in (100, 700, 1900, 2500)]
+        found += self._moving_plate()
+        ranked = P.rank_plate_appearances(found)
+        self.assertNotEqual(ranked[0][1], self.LOGO,
+                            'the burned-in logo must not rank #1')
+        logo_flags = [is_stat for _i, b, _w, is_stat in ranked if b == self.LOGO]
+        self.assertTrue(all(logo_flags), 'the logo must be tagged static (deranked)')
+
+    def test_two_probe_frozen_logo_is_still_deranked(self):
+        # The narrowest escape: a logo that lands in only TWO probes. len<6
+        # used to keep it in the moving list; the floor-of-2 fix catches it.
+        found = [(100, self.LOGO, self.LOGO[2]), (2500, self.LOGO, self.LOGO[2])]
+        found += self._moving_plate(n=4)
+        ranked = P.rank_plate_appearances(found)
+        self.assertNotEqual(ranked[0][1], self.LOGO)
+
+    def test_moving_plate_seen_in_two_probes_stays_moving(self):
+        # Guard against over-deranking: a REAL plate captured in just two
+        # probes, clearly displaced between them, must NOT be called static.
+        found = [(500, (2600, 400, 90, 20), 90), (800, (2900, 410, 96, 21), 96)]
+        ranked = P.rank_plate_appearances(found)
+        self.assertFalse(ranked[0][3], 'a displaced 2-probe plate is not static')
+
+    def test_single_probe_giant_ranks_below_multi_probe_plate(self):
+        # A one-off huge detection (single probe) must sit below a genuine
+        # multi-probe pass even though it is wider — the pre-existing guard.
+        found = [(999, (0, 0, 500, 110), 500)]        # lone 500px flicker
+        found += self._moving_plate(n=5, w0=80)        # real, several probes
+        ranked = P.rank_plate_appearances(found)
+        self.assertEqual(ranked[0][2], self._moving_plate(n=5, w0=80)[-1][2],
+                         'multi-probe plate wins over a single-probe giant')
+
+    def test_return_tuple_shape_is_idx_box_width_static(self):
+        # Contract pinned: gui_pick_roi unpacks exactly (idx, box, w, static).
+        ranked = P.rank_plate_appearances(self._moving_plate(n=3))
+        self.assertTrue(ranked)
+        idx, box, w, is_stat = ranked[0]
+        self.assertIsInstance(idx, int)
+        self.assertEqual(len(box), 4)
+        self.assertIsInstance(is_stat, bool)
+
+    def test_empty_input_returns_empty(self):
+        self.assertEqual(P.rank_plate_appearances([]), [])
+
+
 if __name__ == '__main__':
     unittest.main()

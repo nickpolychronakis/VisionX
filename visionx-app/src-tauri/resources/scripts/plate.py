@@ -407,6 +407,84 @@ def _seek_bar_strip(w, pos, total):
     return strip
 
 
+def rank_plate_appearances(raw_found):
+    """Chain raw per-probe plate detections into PHYSICAL plates and rank them
+    best-first for the `b` (jump-to-best-appearance) key: largest genuine
+    passes first, burned-in overlays / parked cars deranked to the END (still
+    reachable).
+
+    Pulled out of scan_plate_appearances as a PURE function (2026-07-24 b-scan
+    ranking-bug fix) so the clustering + static-derank + ranking can be unit-
+    tested with a plain list — no video, no detector. The field bug (a burned-
+    in 70mai dashcam watermark ranked #1 and OCR'd as '70100') lived entirely
+    in this deterministic logic and was untestable while it was inlined.
+
+    raw_found: list of (frame_idx, box, width) probe detections, box = (x,y,w,h).
+    Returns:   list of (frame_idx, box, width, is_static), best-first.
+    """
+    # Consecutive-probe boxes that overlap (or nearly touch) belong to the same
+    # vehicle — chain them so `b` cycles per VEHICLE (shown at its largest
+    # appearance) instead of through 100+ near-duplicate frames.
+    raw_found = sorted(raw_found, key=lambda t: t[0])
+    clusters = []  # each: {'last': box, 'items': [(idx, box, w)]}
+    for idx, box, bw in raw_found:
+        home = None
+        cx, cy = box[0] + box[2] / 2, box[1] + box[3] / 2
+        for cl in clusters:
+            lb = cl['last']
+            lcx, lcy = lb[0] + lb[2] / 2, lb[1] + lb[3] / 2
+            near = ((lcx - cx) ** 2 + (lcy - cy) ** 2) ** 0.5 < 2.5 * max(box[2], lb[2])
+            if iou(box, lb) > 0.15 or near:
+                home = cl
+                break
+        if home is None:
+            clusters.append({'last': box, 'items': [(idx, box, bw)]})
+        else:
+            home['last'] = box
+            home['items'].append((idx, box, bw))
+
+    def is_static(cl):
+        # Burned-in overlays (dashcam logo, timestamps) detect as "plates" but
+        # sit PIXEL-IDENTICAL across the whole video; even a parked car's plate
+        # jitters a little through compression. The test is RELATIVE:
+        # position/size drift under ~10% of the width. Static clusters are
+        # DERANKED, not dropped — on a fixed camera a parked car is static too
+        # and must stay reachable.
+        #
+        # Floor is 2, NOT 6 (2026-07-24 fix): a positionally-frozen box is a
+        # burned-in overlay no matter HOW FEW probes it lands in — the count
+        # only has to be >=2 for drift to be measurable at all. The 70mai
+        # watermark flickered into just 4 probes (its detector confidence
+        # hovered at the 0.25 accept threshold), so it escaped the old len>=6
+        # guard and — being the widest box in the frame — hijacked #1 over a
+        # genuine 80px moving plate. A real MOVING plate is never frozen across
+        # probes that are `stride` frames (seconds) apart, so this can't
+        # mislabel one; a box that IS frozen is effectively parked/overlay,
+        # which this bucket already handles.
+        if len(cl['items']) < 2:
+            return False
+        xs = [b[0] for _, b, _ in cl['items']]
+        ws = [b[2] for _, b, _ in cl['items']]
+        tol = max(4, 0.1 * (sum(ws) / len(ws)))
+        return (max(xs) - min(xs) <= tol and max(ws) - min(ws) <= tol)
+
+    moving, static = [], []
+    for cl in clusters:
+        best = max(cl['items'], key=lambda t: t[2])
+        (static if is_static(cl) else moving).append((best, len(cl['items'])))
+    # Single-probe clusters rank BELOW multi-probe ones: a genuinely close pass
+    # shows up in several probes, while a borderline logo detection (conf
+    # hovering at the threshold) flickers into ONE probe and — being huge —
+    # would otherwise hijack the top spot. Among multi-probe clusters, widest
+    # first (largest = most readable plate).
+    moving.sort(key=lambda t: (-(t[1] >= 2), -t[0][2]))
+    static.sort(key=lambda t: -t[0][2])
+    moving = [b for b, _n in moving]
+    static = [b for b, _n in static]
+    return ([(i, b, w2, False) for i, b, w2 in moving]
+            + [(i, b, w2, True) for i, b, w2 in static])
+
+
 def scan_plate_appearances(cap, total_frames, detector, hud_frame=None):
     """Automatic whole-video plate scan (user request: "why must I hunt for
     the closest pass manually?"). Probes ~240 evenly-spaced frames with the
@@ -466,63 +544,18 @@ def scan_plate_appearances(cap, total_frames, detector, hud_frame=None):
                 kept.append((box, conf))
         for box, _conf in kept:
             found.append((idx, box, box[2]))
-    # Chain appearances into PHYSICAL plates: consecutive-probe boxes that
-    # overlap (or nearly touch) belong to the same vehicle. The b key then
-    # cycles per VEHICLE (each shown at its largest appearance) instead of
-    # through 100+ near-duplicate frames.
-    found.sort(key=lambda t: t[0])
-    clusters = []  # each: {'last': box, 'items': [(idx, box, w)]}
-    for idx, box, bw in found:
-        home = None
-        cx, cy = box[0] + box[2] / 2, box[1] + box[3] / 2
-        for cl in clusters:
-            lb = cl['last']
-            lcx, lcy = lb[0] + lb[2] / 2, lb[1] + lb[3] / 2
-            near = ((lcx - cx) ** 2 + (lcy - cy) ** 2) ** 0.5 < 2.5 * max(box[2], lb[2])
-            if iou(box, lb) > 0.15 or near:
-                home = cl
-                break
-        if home is None:
-            clusters.append({'last': box, 'items': [(idx, box, bw)]})
-        else:
-            home['last'] = box
-            home['items'].append((idx, box, bw))
-    # Burned-in overlays (dashcam logo, timestamps) detect as "plates" but
-    # sit PIXEL-IDENTICAL across the whole video — even a parked car's
-    # plate jitters a little through compression. Field case: the 70mai
-    # watermark ranked #1 and OCR'd as '70100'.
-    def is_static(cl):
-        # Detector boxes around a burned-in logo jitter a few px (the video
-        # behind it changes), so the test is RELATIVE: position/size drift
-        # under ~10% of the width across many appearances. Static clusters
-        # are DERANKED, not dropped — on a fixed camera a parked car is
-        # static too and must stay reachable.
-        if len(cl['items']) < 6:
-            return False
-        xs = [b[0] for _, b, _ in cl['items']]
-        ws = [b[2] for _, b, _ in cl['items']]
-        tol = max(4, 0.1 * (sum(ws) / len(ws)))
-        return (max(xs) - min(xs) <= tol and max(ws) - min(ws) <= tol)
-    moving, static = [], []
-    for cl in clusters:
-        best = max(cl['items'], key=lambda t: t[2])
-        (static if is_static(cl) else moving).append((best, len(cl['items'])))
-    # Single-probe clusters rank BELOW multi-probe ones: a genuinely close
-    # pass shows up in several probes, while borderline logo detections
-    # (conf hovering at the threshold) flicker into ONE probe and — being
-    # huge — hijacked the top spot (field case: 70mai watermark at 416px).
-    moving.sort(key=lambda t: (-(t[1] >= 2), -t[0][2]))
-    static.sort(key=lambda t: -t[0][2])
-    moving = [b for b, _n in moving]
-    static = [b for b, _n in static]
-    if static:
-        log(f'  ({len(static)} στατικές εμφανίσεις — λογότυπα/υπερθέματα ή '
+    # Cluster into physical plates + rank best-first (static overlays/parked
+    # cars deranked to the end but reachable). Pure logic extracted to
+    # rank_plate_appearances so it is unit-testable — see it for the 70mai
+    # watermark fix.
+    ranked = rank_plate_appearances(found)
+    n_static = sum(1 for *_rest, is_stat in ranked if is_stat)
+    if n_static:
+        log(f'  ({n_static} στατικές εμφανίσεις — λογότυπα/υπερθέματα ή '
             f'παρκαρισμένα — μπήκαν στο ΤΕΛΟΣ της λίστας)')
-    found = ([(i, b, w2, False) for i, b, w2 in moving]
-             + [(i, b, w2, True) for i, b, w2 in static])
-    log(f'  Βρέθηκαν {len(found)} εμφανίσεις — b: άλμα στη μεγαλύτερη, '
+    log(f'  Βρέθηκαν {len(ranked)} εμφανίσεις — b: άλμα στη μεγαλύτερη, '
         f'ξανά b: επόμενη, ENTER: αποδοχή πλαισίου')
-    return found
+    return ranked
 
 
 def gui_pick_roi(cap, total_frames, fps, start_frame=0, detector=None):
